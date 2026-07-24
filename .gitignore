@@ -37,8 +37,3 @@ venv.bak/
 
 # Pytest
 .pytest_cache/
-
-# Local scratch and test scripts
-test_*.py
-1_start_workflow.py
-2_human_approval.py
