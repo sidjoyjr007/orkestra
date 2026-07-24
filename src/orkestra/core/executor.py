@@ -1,0 +1,189 @@
+import json
+import asyncio
+import os
+from typing import List, Dict, Optional, Any
+from orkestra.core.messages import Message, ToolCall
+from orkestra.core.exceptions import WorkflowPausedError
+from orkestra.events.bus import EventBus
+from orkestra.events.base import ToolExecutionStarted, ToolExecutionCompleted, HumanApprovalRequested, HumanApprovalProvided, WorkflowPaused
+from orkestra.guardrails.base import GuardrailStage, GuardrailAction
+from orkestra.core.prompts import TOOL_LOOP_WARNING
+from orkestra.core.telemetry import get_logger
+
+logger = get_logger("orkestra.core.executor")
+
+class ToolExecutor:
+    """
+    Handles the execution of tools on behalf of an Agent.
+    Responsible for Guardrails, HITL (Human-in-the-loop) approvals, truncation, and event emission.
+    """
+    def __init__(self, agent, event_bus: Optional[EventBus] = None):
+        self.agent = agent
+        self.event_bus = event_bus
+        self._pending_approvals: Dict[str, asyncio.Future] = {}
+        
+        if self.event_bus:
+            self.event_bus.subscribe(HumanApprovalProvided, self._on_approval_provided)
+            
+    def _on_approval_provided(self, event: HumanApprovalProvided):
+        if event.tool_call_id in self._pending_approvals:
+            if not self._pending_approvals[event.tool_call_id].done():
+                self._pending_approvals[event.tool_call_id].set_result(event.result)
+                
+    def _count_historical_tool_calls(self, tool_call: ToolCall) -> int:
+        count = 0
+        for msg in reversed(self.agent.messages):
+            if msg.role == "assistant" and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    if tc.function_name == tool_call.function_name and tc.function_arguments == tool_call.function_arguments:
+                        count += 1
+        return count
+
+    def execute(self, tool_calls: List[ToolCall]):
+        tool_map = {tool.name: tool for tool in self.agent.tools}
+        
+        for tool_call in tool_calls:
+            tool_name = tool_call.function_name
+            tool_args_str = tool_call.function_arguments
+            kwargs_args = json.loads(tool_args_str) if tool_args_str else {}
+            
+            # Anti-Loop Steering Mechanism
+            historical_count = self._count_historical_tool_calls(tool_call)
+            if historical_count >= 3:
+                result = TOOL_LOOP_WARNING.format(tool_name=tool_name, historical_count=historical_count)
+                if self.event_bus:
+                    self.event_bus.publish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=result))
+                self.agent.add_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
+                continue
+            
+            tool = tool_map.get(tool_name)
+            if not tool:
+                result = f"Error: Tool '{tool_name}' not found."
+                error = result
+            else:
+                if getattr(tool, 'requires_approval', False):
+                    if self.event_bus:
+                        self.event_bus.publish(HumanApprovalRequested(agent_name=self.agent.name, tool_name=tool_name, tool_call_id=tool_call.id, tool_args=kwargs_args))
+                        self.event_bus.publish(WorkflowPaused(agent_name=self.agent.name))
+                    logger.info(f"Execution paused. Tool '{tool_name}' requires human approval.", extra={"extra_data": {"agent_id": self.agent.id, "tool_name": tool_name}})
+                    raise WorkflowPausedError(f"Workflow paused: Tool '{tool_name}' requires human approval.")
+                    
+                try:
+                    logger.info(f"Executing tool '{tool_name}'", extra={"extra_data": {"agent_id": self.agent.id, "tool_name": tool_name}})
+                    if self.event_bus:
+                        self.event_bus.publish(ToolExecutionStarted(agent_name=self.agent.name, tool_name=tool_name, tool_args=kwargs_args))
+                    result = tool.run(**kwargs_args)
+                    error = None
+                except Exception as e:
+                    logger.error(f"Error executing tool '{tool_name}'", exc_info=True, extra={"extra_data": {"agent_id": self.agent.id, "tool_name": tool_name}})
+                    result = f"Error executing '{tool_name}': {str(e)}"
+                    error = result
+                    
+            if tool and getattr(tool, 'max_result_length', None) is not None and len(result) > tool.max_result_length:
+                artifact_dir = f"/tmp/orkestra_artifacts/{self.agent.session_id}"
+                os.makedirs(artifact_dir, exist_ok=True)
+                artifact_path = os.path.join(artifact_dir, f"{tool_call.id}.txt")
+                with open(artifact_path, "w") as f:
+                    f.write(result)
+                result = result[:tool.max_result_length] + f"\n... [TRUNCATED] The output exceeded the maximum length. The full raw output was automatically saved to: {artifact_path}."
+                    
+            if self.event_bus:
+                self.event_bus.publish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=error))
+            
+            self.agent.add_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
+
+    async def aexecute(self, tool_calls: List[ToolCall]):
+        tool_map = {tool.name: tool for tool in self.agent.tools}
+        
+        for tool_call in tool_calls:
+            tool_name = tool_call.function_name
+            tool_args_str = tool_call.function_arguments
+            kwargs_args = json.loads(tool_args_str) if tool_args_str else {}
+            
+            # Action Guardrails
+            action_guardrails = [g for g in self.agent.guardrails if g.stage == GuardrailStage.ACTION] if hasattr(self.agent, 'guardrails') else []
+            blocked_by_guardrail = False
+            for g in action_guardrails:
+                res = await g.aevaluate(tool_args_str, context={"tool_name": tool_name}, agent=self.agent)
+                if not res.passed:
+                    if res.action == GuardrailAction.BLOCK:
+                        result = f"Error: Tool execution blocked by guardrail: {res.message}"
+                        if self.event_bus:
+                            await self.event_bus.apublish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=result))
+                        await self.agent.aadd_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
+                        blocked_by_guardrail = True
+                        break
+                    elif res.action == GuardrailAction.FEEDBACK:
+                        result = f"SYSTEM WARNING: Guardrail failed for tool '{tool_name}': {res.message}. Please reconsider your action."
+                        if self.event_bus:
+                            await self.event_bus.apublish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=result))
+                        await self.agent.aadd_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
+                        blocked_by_guardrail = True
+                        break
+                    elif res.action == GuardrailAction.REDACT:
+                        tool_args_str = res.modified_content
+                        kwargs_args = json.loads(tool_args_str) if tool_args_str else {}
+                        
+            if blocked_by_guardrail:
+                continue
+            
+            # Anti-Loop Steering Mechanism
+            historical_count = self._count_historical_tool_calls(tool_call)
+            if historical_count >= 3:
+                result = TOOL_LOOP_WARNING.format(tool_name=tool_name, historical_count=historical_count)
+                if self.event_bus:
+                    await self.event_bus.apublish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=result))
+                await self.agent.aadd_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
+                continue
+            
+            tool = tool_map.get(tool_name)
+            if not tool:
+                result = f"Error: Tool '{tool_name}' not found."
+                error = result
+            else:
+                if getattr(tool, 'requires_approval', False):
+                    if self.event_bus:
+                        await self.event_bus.apublish(HumanApprovalRequested(agent_name=self.agent.name, tool_name=tool_name, tool_call_id=tool_call.id, tool_args=kwargs_args))
+                        await self.event_bus.apublish(WorkflowPaused(agent_name=self.agent.name))
+                        
+                    loop = asyncio.get_running_loop()
+                    fut = loop.create_future()
+                    self._pending_approvals[tool_call.id] = fut
+                    
+                    decision_result = await fut
+                    del self._pending_approvals[tool_call.id]
+                    
+                    if "[HUMAN REJECTED]" in decision_result.upper():
+                        result = decision_result
+                        error = None
+                        if self.event_bus:
+                            await self.event_bus.apublish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=error))
+                        await self.agent.aadd_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
+                        continue
+                    else:
+                        pass
+                    
+                try:
+                    logger.info(f"Executing tool '{tool_name}'", extra={"extra_data": {"agent_id": self.agent.id, "tool_name": tool_name}})
+                    if self.event_bus:
+                        await self.event_bus.apublish(ToolExecutionStarted(agent_name=self.agent.name, tool_name=tool_name, tool_args=kwargs_args))
+                    result = await tool.arun(**kwargs_args)
+                    error = None
+                except Exception as e:
+                    logger.error(f"Error executing tool '{tool_name}'", exc_info=True, extra={"extra_data": {"agent_id": self.agent.id, "tool_name": tool_name}})
+                    result = f"Error executing '{tool_name}': {str(e)}"
+                    error = result
+                    
+            if tool and getattr(tool, 'max_result_length', None) is not None and len(result) > tool.max_result_length:
+                import aiofiles
+                artifact_dir = f"/tmp/orkestra_artifacts/{self.agent.session_id}"
+                os.makedirs(artifact_dir, exist_ok=True)
+                artifact_path = os.path.join(artifact_dir, f"{tool_call.id}.txt")
+                async with aiofiles.open(artifact_path, "w") as f:
+                    await f.write(result)
+                result = result[:tool.max_result_length] + f"\n... [TRUNCATED] The output exceeded the maximum length. The full raw output was automatically saved to: {artifact_path}."
+                    
+            if self.event_bus:
+                await self.event_bus.apublish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=error))
+            
+            await self.agent.aadd_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
