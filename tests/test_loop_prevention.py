@@ -1,43 +1,56 @@
 import pytest
 import json
 from unittest.mock import MagicMock
-from orkestra.core.messages import Message, ToolCall
+from orkestra.core.messages import Message, ToolCall, Response
 from orkestra.workflows.runner import AgentRunner
+from orkestra.core.agent import Agent
+from orkestra.core.tools import Tool
+from tests.conftest import MockProvider
+
+async def dummy_tool_func(**kwargs):
+    return "Success"
+
+dummy_tool = Tool(
+    name="dummy_tool",
+    description="Dummy",
+    func=dummy_tool_func,
+    schema={"type": "function", "function": {"name": "dummy_tool", "parameters": {"type": "object", "properties": {}}}}
+)
 
 @pytest.mark.asyncio
-async def test_tool_loop_prevention():
-    # 1. Setup mock agent and tool
-    agent = MagicMock()
-    agent.name = "TestAgent"
-    agent.messages = []
+async def test_tool_loop_prevention(event_bus, memory_store):
+    provider = MockProvider([
+        Response(message=Message(role="assistant", tool_calls=[ToolCall(id="call_0", function_name="dummy_tool", function_arguments='{}')])),
+        Response(message=Message(role="assistant", tool_calls=[ToolCall(id="call_1", function_name="dummy_tool", function_arguments='{}')])),
+        Response(message=Message(role="assistant", tool_calls=[ToolCall(id="call_2", function_name="dummy_tool", function_arguments='{}')])),
+        Response(message=Message(role="assistant", tool_calls=[ToolCall(id="call_3", function_name="dummy_tool", function_arguments='{}')])),
+        Response(message=Message(role="assistant", content="Final answer"))
+    ])
     
-    # We will track messages added to the agent
-    def add_message(msg):
-        agent.messages.append(msg)
+    agent = Agent(
+        name="Bot",
+        description="Mock bot",
+        system_prompt="You are a mock bot.",
+        provider=provider,
+        memory=memory_store,
+        session_id="test",
+        tools=[dummy_tool],
+        event_bus=event_bus
+    )
     
-    agent.add_message.side_effect = add_message
-    agent.aadd_message.side_effect = add_message
+    runner = AgentRunner(agent, event_bus=event_bus)
     
-    # Mock tool
-    mock_tool = MagicMock()
-    mock_tool.name = "dummy_tool"
-    async def arun(**kwargs):
-        return "Success"
-    mock_tool.arun = arun
-    agent.tools = [mock_tool]
-    
-    runner = AgentRunner(agent)
-    
-    tool_call_json = '{"arg": 1}'
+    # We will trigger the loop manually via aexecute
+    tool_call_json = '{}'
     
     # Simulate the LLM repeatedly calling the exact same tool
     for i in range(4):
         # The LLM outputs an assistant message with the tool call
         tc = ToolCall(id=f"call_{i}", function_name="dummy_tool", function_arguments=tool_call_json)
-        agent.messages.append(Message(role="assistant", content=None, tool_calls=[tc]))
+        await agent.aadd_message(Message(role="assistant", content=None, tool_calls=[tc]))
         
         # The runner executes it
-        await runner._aexecute_tool_calls([tc])
+        await runner.executor.aexecute([tc])
         
     # There should be 4 tool response messages added
     tool_responses = [m for m in agent.messages if m.role == "tool"]

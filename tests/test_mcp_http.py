@@ -1,47 +1,77 @@
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from orkestra.mcp.http_client import MCPHttpToolkit
+import httpx
+import json
 
 @pytest.mark.asyncio
 async def test_mcp_http_toolkit_lifecycle():
-    with patch("orkestra.mcp.http_client.sse_client") as mock_sse_client, \
-         patch("orkestra.mcp.http_client.ClientSession") as mock_client_session:
+    with patch("orkestra.mcp.http_client.httpx.AsyncClient") as mock_client_class:
              
-        # Mock SSE
-        mock_sse_cm = AsyncMock()
-        mock_sse_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
-        mock_sse_client.return_value = mock_sse_cm
-        
         # Mock Session
-        mock_session_inst = AsyncMock()
-        mock_session_cm = AsyncMock()
-        mock_session_cm.__aenter__.return_value = mock_session_inst
-        mock_client_session.return_value = mock_session_cm
+        mock_client = MagicMock()
+        mock_client.aclose = AsyncMock()
+        mock_client_class.return_value = mock_client
         
-        # Mock tools
-        mock_tool_1 = MagicMock(name="test_tool", description="A test tool", inputSchema={"type": "object", "properties": {}})
-        # Overwrite the actual mock name attribute to bypass MagicMock's internal name handling
-        mock_tool_1.name = "test_tool"
+        # Mock tools endpoint response for stream iteration
+        mock_stream_ctx = AsyncMock()
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
         
-        mock_session_inst.list_tools.return_value = MagicMock(tools=[mock_tool_1])
+        # Create a mock json response
+        response_data = {
+            "jsonrpc": "2.0",
+            "result": {
+                "tools": [
+                    {
+                        "name": "test_tool",
+                        "description": "A test tool",
+                        "inputSchema": {"type": "object", "properties": {}}
+                    }
+                ]
+            }
+        }
         
-        # Mock tool call response
-        mock_session_inst.call_tool.return_value = MagicMock(
-            isError=False, 
-            content=[MagicMock(type="text", text="Success")]
-        )
+        # aiter_lines yields lines
+        async def mock_aiter_lines():
+            yield "event: message"
+            yield f"data: {json.dumps(response_data)}"
+            
+        mock_response.aiter_lines = mock_aiter_lines
+        mock_stream_ctx.__aenter__.return_value = mock_response
+        mock_client.stream.return_value = mock_stream_ctx
         
         toolkit = MCPHttpToolkit("http://mock/sse", headers={"Auth": "Key"})
         
-        async with toolkit as tools:
-            assert len(tools) == 1
-            assert tools[0].name == "test_tool"
-            assert tools[0].description == "A test tool"
+        tools = await toolkit.load_tools()
+        
+        assert len(tools) == 1
+        assert tools[0].name == "test_tool"
+        assert tools[0].description == "A test tool"
+        
+        # Mock tool call response
+        call_response_data = {
+            "jsonrpc": "2.0",
+            "result": {
+                "content": [{"type": "text", "text": "Success"}],
+                "isError": False
+            }
+        }
+        
+        async def mock_call_aiter_lines():
+            yield "event: message"
+            yield f"data: {json.dumps(call_response_data)}"
             
-            # Execute the tool
-            result = await tools[0].arun()
-            assert result == "Success"
-            
-        # Verify initialization and call logic
-        mock_session_inst.initialize.assert_awaited_once()
-        mock_session_inst.call_tool.assert_awaited_once_with("test_tool", arguments={})
+        mock_call_response = AsyncMock()
+        mock_call_response.status_code = 200
+        mock_call_response.aiter_lines = mock_call_aiter_lines
+        
+        mock_call_stream_ctx = AsyncMock()
+        mock_call_stream_ctx.__aenter__.return_value = mock_call_response
+        mock_client.stream.return_value = mock_call_stream_ctx
+        
+        # Execute the tool
+        result = await tools[0].arun()
+        assert result == "Success"
+        
+        await toolkit.close()

@@ -1,289 +1,127 @@
 import os
+import json
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
-import openai
-from orkestra.core.messages import Message, Response, ResponseChunk, ToolCall
+from openai import OpenAI, AsyncOpenAI
 from orkestra.providers.base import BaseProvider
-from orkestra.core.exceptions import (
-    AuthenticationError, RateLimitError, ProviderError, ContextWindowExceededError
-)
-import functools
-
-def _handle_openai_errors(func):
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except openai.AuthenticationError as e:
-            raise AuthenticationError(str(e)) from e
-        except openai.RateLimitError as e:
-            raise RateLimitError(str(e)) from e
-        except openai.BadRequestError as e:
-            # Often related to context window or invalid params
-            if "context_length_exceeded" in str(e):
-                raise ContextWindowExceededError(str(e)) from e
-            raise ProviderError(str(e)) from e
-        except openai.APIError as e:
-            raise ProviderError(str(e)) from e
-        except Exception as e:
-            raise ProviderError(str(e)) from e
-    
-    @functools.wraps(func)
-    async def awrapper(*args, **kwargs):
-        try:
-            if hasattr(func, '__aiter__') or str(type(func)) == "<class 'async_generator'>":
-                # We handle streaming iterators differently below, but for simple async defs:
-                pass
-            return await func(*args, **kwargs)
-        except openai.AuthenticationError as e:
-            raise AuthenticationError(str(e)) from e
-        except openai.RateLimitError as e:
-            raise RateLimitError(str(e)) from e
-        except openai.BadRequestError as e:
-            if "context_length_exceeded" in str(e):
-                raise ContextWindowExceededError(str(e)) from e
-            raise ProviderError(str(e)) from e
-        except openai.APIError as e:
-            raise ProviderError(str(e)) from e
-        except Exception as e:
-            raise ProviderError(str(e)) from e
-            
-    if asyncio.iscoroutinefunction(func):
-        return awrapper
-    return wrapper
+from orkestra.core.messages import Message, Response, ResponseChunk, ToolCall
+from orkestra.core.exceptions import ProviderError, AuthenticationError
+import tenacity
 
 class OpenAIProvider(BaseProvider):
-    """OpenAI API provider implementation."""
+    """OpenAI API provider for Orkestra."""
 
-    def __init__(self, model_name: str = "gpt-4-turbo", api_key: Optional[str] = None, **kwargs):
+    def __init__(self, model_name: str = "gpt-4o", api_key: Optional[str] = None, **kwargs):
         super().__init__(model_name, api_key, **kwargs)
-        self.client = openai.OpenAI(api_key=self.api_key or os.environ.get("OPENAI_API_KEY"), **kwargs.get("client_kwargs", {}))
-        self.aclient = openai.AsyncOpenAI(api_key=self.api_key or os.environ.get("OPENAI_API_KEY"), **kwargs.get("client_kwargs", {}))
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        if not self.api_key:
+            raise ValueError("OPENAI_API_KEY must be provided or set in environment.")
+        self.client = OpenAI(api_key=self.api_key)
+        self.async_client = AsyncOpenAI(api_key=self.api_key)
 
-    def _format_messages(self, messages: List[Message]) -> List[Dict[str, Any]]:
-        formatted = []
+    def _convert_messages(self, messages: List[Message]) -> List[Dict[str, Any]]:
+        oai_messages = []
         for msg in messages:
-            msg_dict = {"role": msg.role, "content": msg.content or ""}
-            if msg.name:
-                msg_dict["name"] = msg.name
-            if msg.tool_calls:
-                msg_dict["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function_name,
-                            "arguments": tc.function_arguments,
+            if msg.role == "user":
+                oai_messages.append({"role": "user", "content": msg.content})
+            elif msg.role == "assistant":
+                oai_msg = {"role": "assistant", "content": msg.content or ""}
+                if msg.tool_calls:
+                    oai_msg["tool_calls"] = [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function_name,
+                                "arguments": tc.function_arguments,
+                            }
                         }
-                    }
-                    for tc in msg.tool_calls
-                ]
-            if msg.tool_call_id:
-                msg_dict["tool_call_id"] = msg.tool_call_id
-            formatted.append(msg_dict)
-        return formatted
+                        for tc in msg.tool_calls
+                    ]
+                oai_messages.append(oai_msg)
+            elif msg.role == "tool":
+                oai_messages.append({
+                    "role": "tool",
+                    "content": msg.content,
+                    "tool_call_id": msg.tool_call_id,
+                })
+            elif msg.role == "system":
+                oai_messages.append({"role": "system", "content": msg.content})
+        return oai_messages
 
-    @_handle_openai_errors
-    def generate(
-        self,
-        messages: List[Message],
-        temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        **kwargs
-    ) -> Response:
-        formatted_messages = self._format_messages(messages)
-        
-        request_kwargs = {
-            "model": self.model_name,
-            "messages": formatted_messages,
-            "temperature": temperature,
-            **kwargs
-        }
-        if max_tokens:
-            request_kwargs["max_tokens"] = max_tokens
-        if tools:
-            request_kwargs["tools"] = tools
-
-        completion = self.client.chat.completions.create(**request_kwargs)
-        choice = completion.choices[0]
-        
-        tool_calls = None
-        if choice.message.tool_calls:
-            tool_calls = [
-                ToolCall(
-                    id=tc.id,
-                    function_name=tc.function.name,
-                    function_arguments=tc.function.arguments
-                )
-                for tc in choice.message.tool_calls
-            ]
-            
-        message = Message(
-            role="assistant",
-            content=choice.message.content,
-            tool_calls=tool_calls
-        )
-        
-        usage = {}
-        if completion.usage:
-            usage = {
-                "prompt_tokens": completion.usage.prompt_tokens,
-                "completion_tokens": completion.usage.completion_tokens,
-                "total_tokens": completion.usage.total_tokens
+    @tenacity.retry(stop=tenacity.stop_after_attempt(3), wait=tenacity.wait_exponential(multiplier=1, min=2, max=10), reraise=True)
+    def generate(self, messages: List[Message], temperature: float = 0.7, max_tokens: Optional[int] = None, tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Response:
+        try:
+            oai_messages = self._convert_messages(messages)
+            request_kwargs = {
+                "model": self.model_name,
+                "messages": oai_messages,
+                "temperature": temperature,
             }
+            if max_tokens:
+                request_kwargs["max_tokens"] = max_tokens
+            if tools:
+                request_kwargs["tools"] = tools
 
-        return Response(
-            message=message,
-            finish_reason=choice.finish_reason,
-            usage=usage
-        )
-
-    @_handle_openai_errors
-    def generate_stream(
-        self,
-        messages: List[Message],
-        temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        **kwargs
-    ) -> Iterator[ResponseChunk]:
-        formatted_messages = self._format_messages(messages)
-        
-        request_kwargs = {
-            "model": self.model_name,
-            "messages": formatted_messages,
-            "temperature": temperature,
-            "stream": True,
-            **kwargs
-        }
-        if max_tokens:
-            request_kwargs["max_tokens"] = max_tokens
-        if tools:
-            request_kwargs["tools"] = tools
-
-        stream = self.client.chat.completions.create(**request_kwargs)
-        
-        for chunk in stream:
-            if not chunk.choices:
-                continue
-            choice = chunk.choices[0]
+            response = self.client.chat.completions.create(**request_kwargs)
+            choice = response.choices[0]
             
-            tool_calls = None
-            if choice.delta.tool_calls:
-                tool_calls = [
-                    ToolCall(
-                        id=tc.id or "",
-                        function_name=tc.function.name or "",
-                        function_arguments=tc.function.arguments or ""
-                    )
-                    for tc in choice.delta.tool_calls
-                ]
-
-            yield ResponseChunk(
-                content=choice.delta.content,
-                tool_calls=tool_calls,
-                finish_reason=choice.finish_reason
+            tool_calls = []
+            if choice.message.tool_calls:
+                for tc in choice.message.tool_calls:
+                    tool_calls.append(ToolCall(
+                        id=tc.id,
+                        function_name=tc.function.name,
+                        function_arguments=tc.function.arguments
+                    ))
+                    
+            content = choice.message.content or ""
+            return Response(
+                message=Message(role="assistant", content=content, tool_calls=tool_calls),
+                usage={"completion_tokens": response.usage.completion_tokens, "prompt_tokens": response.usage.prompt_tokens} if response.usage else {}
             )
+        except Exception as e:
+            if "Authentication" in str(e):
+                raise AuthenticationError(str(e)) from e
+            raise ProviderError(str(e)) from e
 
-    @_handle_openai_errors
-    async def agenerate(
-        self,
-        messages: List[Message],
-        temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        **kwargs
-    ) -> Response:
-        formatted_messages = self._format_messages(messages)
-        
-        request_kwargs = {
-            "model": self.model_name,
-            "messages": formatted_messages,
-            "temperature": temperature,
-            **kwargs
-        }
-        if max_tokens:
-            request_kwargs["max_tokens"] = max_tokens
-        if tools:
-            request_kwargs["tools"] = tools
-
-        completion = await self.aclient.chat.completions.create(**request_kwargs)
-        choice = completion.choices[0]
-        
-        tool_calls = None
-        if choice.message.tool_calls:
-            tool_calls = [
-                ToolCall(
-                    id=tc.id,
-                    function_name=tc.function.name,
-                    function_arguments=tc.function.arguments
-                )
-                for tc in choice.message.tool_calls
-            ]
-            
-        message = Message(
-            role="assistant",
-            content=choice.message.content,
-            tool_calls=tool_calls
-        )
-        
-        usage = {}
-        if completion.usage:
-            usage = {
-                "prompt_tokens": completion.usage.prompt_tokens,
-                "completion_tokens": completion.usage.completion_tokens,
-                "total_tokens": completion.usage.total_tokens
+    @tenacity.retry(stop=tenacity.stop_after_attempt(3), wait=tenacity.wait_exponential(multiplier=1, min=2, max=10), reraise=True)
+    async def agenerate(self, messages: List[Message], temperature: float = 0.7, max_tokens: Optional[int] = None, tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Response:
+        try:
+            oai_messages = self._convert_messages(messages)
+            request_kwargs = {
+                "model": self.model_name,
+                "messages": oai_messages,
+                "temperature": temperature,
             }
+            if max_tokens:
+                request_kwargs["max_tokens"] = max_tokens
+            if tools:
+                request_kwargs["tools"] = tools
 
-        return Response(
-            message=message,
-            finish_reason=choice.finish_reason,
-            usage=usage
-        )
-
-    @_handle_openai_errors
-    async def agenerate_stream(
-        self,
-        messages: List[Message],
-        temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        **kwargs
-    ) -> AsyncIterator[ResponseChunk]:
-        formatted_messages = self._format_messages(messages)
-        
-        request_kwargs = {
-            "model": self.model_name,
-            "messages": formatted_messages,
-            "temperature": temperature,
-            "stream": True,
-            **kwargs
-        }
-        if max_tokens:
-            request_kwargs["max_tokens"] = max_tokens
-        if tools:
-            request_kwargs["tools"] = tools
-
-        stream = await self.aclient.chat.completions.create(**request_kwargs)
-        
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
-            choice = chunk.choices[0]
+            response = await self.async_client.chat.completions.create(**request_kwargs)
+            choice = response.choices[0]
             
-            tool_calls = None
-            if choice.delta.tool_calls:
-                tool_calls = [
-                    ToolCall(
-                        id=tc.id or "",
-                        function_name=tc.function.name or "",
-                        function_arguments=tc.function.arguments or ""
-                    )
-                    for tc in choice.delta.tool_calls
-                ]
-
-            yield ResponseChunk(
-                content=choice.delta.content,
-                tool_calls=tool_calls,
-                finish_reason=choice.finish_reason
+            tool_calls = []
+            if choice.message.tool_calls:
+                for tc in choice.message.tool_calls:
+                    tool_calls.append(ToolCall(
+                        id=tc.id,
+                        function_name=tc.function.name,
+                        function_arguments=tc.function.arguments
+                    ))
+                    
+            content = choice.message.content or ""
+            return Response(
+                message=Message(role="assistant", content=content, tool_calls=tool_calls),
+                usage={"completion_tokens": response.usage.completion_tokens, "prompt_tokens": response.usage.prompt_tokens} if response.usage else {}
             )
+        except Exception as e:
+            if "Authentication" in str(e) or "401" in str(e):
+                raise AuthenticationError(str(e)) from e
+            raise ProviderError(str(e)) from e
+
+    def generate_stream(self, messages: List[Message], temperature: float = 0.7, max_tokens: Optional[int] = None, tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Iterator[ResponseChunk]:
+        raise NotImplementedError("Streaming not yet implemented for OpenAIProvider")
+
+    async def agenerate_stream(self, messages: List[Message], temperature: float = 0.7, max_tokens: Optional[int] = None, tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> AsyncIterator[ResponseChunk]:
+        raise NotImplementedError("Streaming not yet implemented for OpenAIProvider")

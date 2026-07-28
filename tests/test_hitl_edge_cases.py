@@ -7,7 +7,7 @@ from orkestra.workflows.runner import AgentRunner
 from orkestra.events.base import HumanApprovalRequested, HumanApprovalProvided
 from tests.conftest import MockProvider
 
-def dangerous_func(version: str):
+def dangerous_func(version: str, **kwargs):
     return f"Deployed {version}"
 
 dangerous_tool = Tool(
@@ -34,7 +34,7 @@ async def test_hitl_graceful_suspension_and_resume_approved(event_bus, memory_st
     # Wait for the future to be registered
     await asyncio.sleep(0.1)
     
-    assert "call_1" in runner._pending_approvals
+    assert "call_1" in runner.executor._pending_approvals
     
     # Simulate webhook
     await event_bus.apublish(HumanApprovalProvided(tool_call_id="call_1", result="[HUMAN APPROVED] user says yes"))
@@ -61,7 +61,7 @@ async def test_hitl_human_rejected(event_bus, memory_store):
     run_task = asyncio.create_task(runner.arun())
     await asyncio.sleep(0.1)
     
-    assert "call_2" in runner._pending_approvals
+    assert "call_2" in runner.executor._pending_approvals
     
     await event_bus.apublish(HumanApprovalProvided(tool_call_id="call_2", result="[HUMAN REJECTED] Not allowed"))
     

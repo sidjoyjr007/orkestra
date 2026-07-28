@@ -60,7 +60,45 @@ class ToolExecutor:
             if not tool:
                 result = f"Error: Tool '{tool_name}' not found."
                 error = result
-            else:
+                
+            # Action Guardrails (Sync wrapper over async evaluate)
+            action_guardrails = [g for g in self.agent.guardrails if g.stage == GuardrailStage.ACTION] if hasattr(self.agent, 'guardrails') else []
+            blocked_by_guardrail = False
+            for g in action_guardrails:
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                    
+                if loop and loop.is_running():
+                    import nest_asyncio
+                    nest_asyncio.apply()
+                    
+                res = asyncio.run(g.aevaluate(tool_args_str, context={"tool_name": tool_name, "tool_args": kwargs_args}, agent=self.agent))
+                if not res.passed:
+                    if res.action == GuardrailAction.BLOCK:
+                        result = f"Error: Tool execution blocked by guardrail: {res.message}"
+                        if self.event_bus:
+                            self.event_bus.publish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=result))
+                        self.agent.add_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
+                        blocked_by_guardrail = True
+                        break
+                    elif res.action == GuardrailAction.FEEDBACK:
+                        result = f"SYSTEM WARNING: Guardrail failed for tool '{tool_name}': {res.message}. Please reconsider your action."
+                        if self.event_bus:
+                            self.event_bus.publish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=result))
+                        self.agent.add_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
+                        blocked_by_guardrail = True
+                        break
+                    elif res.action == GuardrailAction.REDACT:
+                        tool_args_str = res.modified_content
+                        kwargs_args = json.loads(tool_args_str) if tool_args_str else {}
+                        
+            if blocked_by_guardrail:
+                continue
+                
+            if tool:
                 if getattr(tool, 'requires_approval', False):
                     if self.event_bus:
                         self.event_bus.publish(HumanApprovalRequested(agent_name=self.agent.name, tool_name=tool_name, tool_call_id=tool_call.id, tool_args=kwargs_args))
@@ -70,10 +108,18 @@ class ToolExecutor:
                     
                 try:
                     logger.info(f"Executing tool '{tool_name}'", extra={"extra_data": {"agent_id": self.agent.id, "tool_name": tool_name}})
+                    
+                    # Inject hidden context parameters for advanced tools (like BackgroundTool)
+                    kwargs_args["_session_id"] = self.agent.session_id
+                    kwargs_args["_tool_call_id"] = tool_call.id
+                    kwargs_args["_agent_name"] = self.agent.name
+                    
                     if self.event_bus:
                         self.event_bus.publish(ToolExecutionStarted(agent_name=self.agent.name, tool_name=tool_name, tool_args=kwargs_args))
                     result = tool.run(**kwargs_args)
                     error = None
+                except WorkflowPausedError as e:
+                    raise e
                 except Exception as e:
                     logger.error(f"Error executing tool '{tool_name}'", exc_info=True, extra={"extra_data": {"agent_id": self.agent.id, "tool_name": tool_name}})
                     result = f"Error executing '{tool_name}': {str(e)}"
@@ -104,7 +150,7 @@ class ToolExecutor:
             action_guardrails = [g for g in self.agent.guardrails if g.stage == GuardrailStage.ACTION] if hasattr(self.agent, 'guardrails') else []
             blocked_by_guardrail = False
             for g in action_guardrails:
-                res = await g.aevaluate(tool_args_str, context={"tool_name": tool_name}, agent=self.agent)
+                res = await g.aevaluate(tool_args_str, context={"tool_name": tool_name, "tool_args": kwargs_args}, agent=self.agent)
                 if not res.passed:
                     if res.action == GuardrailAction.BLOCK:
                         result = f"Error: Tool execution blocked by guardrail: {res.message}"
@@ -165,10 +211,19 @@ class ToolExecutor:
                     
                 try:
                     logger.info(f"Executing tool '{tool_name}'", extra={"extra_data": {"agent_id": self.agent.id, "tool_name": tool_name}})
+                    
+                    # Inject hidden context parameters for advanced tools (like BackgroundTool)
+                    kwargs_args["_session_id"] = self.agent.session_id
+                    kwargs_args["_tool_call_id"] = tool_call.id
+                    kwargs_args["_agent_name"] = self.agent.name
+                    
                     if self.event_bus:
                         await self.event_bus.apublish(ToolExecutionStarted(agent_name=self.agent.name, tool_name=tool_name, tool_args=kwargs_args))
                     result = await tool.arun(**kwargs_args)
                     error = None
+                except WorkflowPausedError as e:
+                    # Bubble these up natively to the Orchestrator or Runner
+                    raise e
                 except Exception as e:
                     logger.error(f"Error executing tool '{tool_name}'", exc_info=True, extra={"extra_data": {"agent_id": self.agent.id, "tool_name": tool_name}})
                     result = f"Error executing '{tool_name}': {str(e)}"

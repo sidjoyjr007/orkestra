@@ -1,10 +1,10 @@
 from typing import List
-from orkestra.core.tools import Tool
+from orkestra.core.tools import Tool, HostTool
 from orkestra.workspace.base import BaseWorkspaceStore, Plan, Task
 
 def get_planning_tools(session_id: str, workspace: BaseWorkspaceStore) -> List[Tool]:
     
-    async def create_plan(tasks: List[str]) -> str:
+    async def create_plan(tasks: list[str]) -> str:
         """Create a new active plan, archiving any existing active plan."""
         plan = Plan(session_id=session_id, status="ACTIVE")
         for i, t_desc in enumerate(tasks):
@@ -53,7 +53,7 @@ def get_planning_tools(session_id: str, workspace: BaseWorkspaceStore) -> List[T
         return f"Task {new_id} added successfully."
         
     return [
-        Tool(
+        HostTool(
             name="create_plan",
             description="Create a new active plan for the user's request. Pass a list of task descriptions.",
             func=create_plan,
@@ -75,7 +75,7 @@ def get_planning_tools(session_id: str, workspace: BaseWorkspaceStore) -> List[T
                 }
             }
         ),
-        Tool(
+        HostTool(
             name="update_task",
             description="Update a task's status and add notes. Use this when you start or finish a task. Status must be: TODO, IN_PROGRESS, DONE, or BLOCKED.",
             func=update_task,
@@ -96,7 +96,7 @@ def get_planning_tools(session_id: str, workspace: BaseWorkspaceStore) -> List[T
                 }
             }
         ),
-        Tool(
+        HostTool(
             name="add_task",
             description="Add a new task to the end of the active plan.",
             func=add_task,

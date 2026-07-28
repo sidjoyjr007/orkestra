@@ -4,7 +4,7 @@ from orkestra.core.messages import Message, Response, ResponseChunk
 from orkestra.providers.base import BaseProvider
 from orkestra.memory.base import BaseMemory
 from orkestra.events.bus import EventBus
-from orkestra.events.base import AgentStepStarted, AgentStepCompleted
+from orkestra.events.base import AgentStepStarted, AgentStepCompleted, TokenUsageReported
 from orkestra.core.context import CompactionStrategy, KeepAllStrategy
 from orkestra.core.builtin_tools import get_read_file_chunk_tool
 from orkestra.core.tools import Tool
@@ -34,7 +34,8 @@ class Agent:
         workspace: Optional[BaseWorkspaceStore] = None,
         guardrails: Optional[List[BaseGuardrail]] = None,
         id: Optional[str] = None,
-        tool_registry_url: Optional[str] = None
+        tool_registry_url: Optional[str] = None,
+        artifact_dir: Optional[str] = None
     ):
         """
         Initialize a new Agent.
@@ -60,20 +61,37 @@ class Agent:
         self.guardrails = guardrails or []
         self.event_bus = event_bus or getattr(provider, 'event_bus', None)
         self.id = id or str(uuid.uuid4())
+        self.artifact_dir = artifact_dir or f"/tmp/orkestra_artifacts/{self.session_id}"
         
         # Tool RAG initialization
         self.tool_registry_url = tool_registry_url
+        self.usage = {"prompt_tokens": 0, "completion_tokens": 0}
         self.tool_registry = None
         if self.tool_registry_url:
-            from orkestra.core.tool_registry import ToolRegistry
-            self.tool_registry = ToolRegistry(url=self.tool_registry_url, agent_id=self.id)
+            try:
+                from orkestra.core.tool_registry import ToolRegistry
+                self.tool_registry = ToolRegistry(
+                    url=self.tool_registry_url, 
+                    agent_id=self.id
+                )
+            except ImportError:
+                pass
             
             # The agent starts with zero tools loaded by default in RAG mode
             self.tools = []
-            
             # Auto-inject the default search_tools capability
             from orkestra.core.builtin_tools import get_search_tools_tool
             self.tools.append(get_search_tools_tool(self))
+            
+        # Auto-inject planning tools if a workspace is provided
+        if self.workspace:
+            from orkestra.workspace.tools import get_planning_tools
+            planning_tools = get_planning_tools(session_id=self.session_id, workspace=self.workspace)
+            # Ensure we don't duplicate tools if the user already passed them
+            existing_tool_names = {t.name for t in self.tools}
+            for pt in planning_tools:
+                if pt.name not in existing_tool_names:
+                    self.tools.append(pt)
         
         # Load from memory if available
         if self.memory:
@@ -88,6 +106,38 @@ class Agent:
         else:
             self.messages = messages or []
             
+    def clone(self) -> 'Agent':
+        """
+        Creates a deep-ish clone of the agent for use in sub-sessions or handoffs.
+        Ensures that memory (messages) and dynamically injected tools do not leak 
+        back into the original template agent.
+        """
+        import copy
+        
+        # We want a fresh list, but the tools inside can be shared references
+        cloned_tools = list(self.tools) if self.tools else []
+        cloned_messages = list(self.messages) if self.messages else []
+        cloned_guardrails = list(self.guardrails) if self.guardrails else []
+        
+        return Agent(
+            name=self.name,
+            description=self.description,
+            system_prompt=self.system_prompt,
+            provider=self.provider, # Shared
+            tools=cloned_tools,
+            messages=cloned_messages,
+            max_iterations=self.max_iterations,
+            memory=self.memory, # Shared (relies on session_id for isolation)
+            session_id=self.session_id,
+            event_bus=self.event_bus, # Shared
+            compaction=self.compaction,
+            workspace=self.workspace, # Shared
+            guardrails=cloned_guardrails,
+            id=self.id, # Keep same ID to indicate it's the same logical agent profile
+            tool_registry_url=self.tool_registry_url,
+            artifact_dir=self.artifact_dir
+        )
+
     def add_message(self, message: Message):
         """Add a message to the agent's history and persist to memory if configured."""
         self.messages.append(message)
@@ -95,10 +145,17 @@ class Agent:
             self.memory.add_message(self.session_id, message)
             
     async def aadd_message(self, message: Message):
-        """Asynchronously add a message to the agent's history and persist to memory."""
+        """Add a message asynchronously to history and persist to memory."""
         self.messages.append(message)
         if self.memory:
-            await self.memory.aadd_message(self.session_id, message)
+            if hasattr(self.memory, 'aadd_message'):
+                await self.memory.aadd_message(self.session_id, message)
+            else:
+                self.memory.add_message(self.session_id, message)
+                
+    async def aapprove_tool(self, tool_call_id: str, tool_name: str, result: str):
+        """Used for stateless webhook recovery of HITL tool approvals."""
+        await self.aadd_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call_id))
 
 
             
@@ -142,6 +199,26 @@ class Agent:
         
     def _prepare_messages(self, messages: List[Message]) -> List[Message]:
         import asyncio
+        
+        if not self.compaction:
+            prepared = [Message(role="system", content=self.system_prompt)] + messages
+            # Dynamically inject active plan if available
+            if self.workspace:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                
+                if loop and loop.is_running():
+                    import nest_asyncio
+                    nest_asyncio.apply()
+                
+                active_plan = asyncio.run(self.workspace.aget_active_plan(self.session_id))
+                if active_plan:
+                    plan_str = f"\n\nCURRENT PLAN:\n{active_plan.to_markdown()}"
+                    prepared[0].content += plan_str
+            return prepared
+            
         # Fallback for sync `step`
         try:
             loop = asyncio.get_running_loop()
@@ -171,7 +248,19 @@ class Agent:
         response = self.provider.generate(messages=prepared_messages, **gen_kwargs)
         self.add_message(response.message)
         
+        # Track token usage
+        p_tokens = response.usage.get("prompt_tokens", 0)
+        c_tokens = response.usage.get("completion_tokens", 0)
+        self.usage["prompt_tokens"] += p_tokens
+        self.usage["completion_tokens"] += c_tokens
+        
         if self.event_bus:
+            self.event_bus.publish(TokenUsageReported(
+                agent_name=self.name,
+                session_id=self.session_id,
+                prompt_tokens=p_tokens,
+                completion_tokens=c_tokens
+            ))
             self.event_bus.publish(AgentStepCompleted(
                 agent_name=self.name, 
                 session_id=self.session_id,
@@ -208,7 +297,7 @@ class Agent:
         if needs_read_tool:
             has_read_tool = any(t.name == "read_file_chunk" for t in self.tools)
             if not has_read_tool:
-                self.tools.append(get_read_file_chunk_tool(self.session_id))
+                self.tools.append(get_read_file_chunk_tool(self.artifact_dir))
                 
         # Dynamically inject planning tools based on workspace state
         if self.workspace:
@@ -238,9 +327,39 @@ class Agent:
             gen_kwargs["tools"] = provider_tools
             
         response = await self.provider.agenerate(messages=prepared_messages, **gen_kwargs)
+        
+        # Run OUTPUT guardrails on the LLM's response
+        if self.guardrails and response.message.content:
+            output_guardrails = [g for g in self.guardrails if g.stage == GuardrailStage.OUTPUT]
+            for g in output_guardrails:
+                res = await g.aevaluate(response.message.content, agent=self)
+                if not res.passed:
+                    if res.action == GuardrailAction.BLOCK:
+                        # Clear the message so it doesn't get saved to memory
+                        response.message.content = ""
+                        response.message.tool_calls = []
+                        raise Exception(f"Output blocked by guardrail: {res.message}")
+                    elif res.action == GuardrailAction.REDACT:
+                        response.message.content = res.modified_content
+                    elif res.action == GuardrailAction.FEEDBACK:
+                        # Inject feedback warning so the LLM sees it on the next turn
+                        await self.aadd_message(Message(role="system", content=f"SYSTEM WARNING (Your Output): {res.message}"))
+                        
         await self.aadd_message(response.message)
         
+        # Track token usage
+        p_tokens = response.usage.get("prompt_tokens", 0)
+        c_tokens = response.usage.get("completion_tokens", 0)
+        self.usage["prompt_tokens"] += p_tokens
+        self.usage["completion_tokens"] += c_tokens
+        
         if self.event_bus:
+            await self.event_bus.apublish(TokenUsageReported(
+                agent_name=self.name,
+                session_id=self.session_id,
+                prompt_tokens=p_tokens,
+                completion_tokens=c_tokens
+            ))
             await self.event_bus.apublish(AgentStepCompleted(
                 agent_name=self.name, 
                 session_id=self.session_id,

@@ -113,13 +113,35 @@ class ToolRegistry:
                 )
                 return tool
             else:
-                # Local function tool reconstruction is extremely complex if the code isn't available.
-                # For this architecture, we assume local tools can be looked up by name if needed,
-                # or we just create a dummy tool that raises NotImplementedError.
-                def dummy_func(**kwargs):
-                    raise NotImplementedError("Dynamic local tool execution from VectorDB is not fully implemented.")
+                # Dynamic local tool reconstruction from source code in VectorDB
+                code = metadata.get("code")
+                if code:
+                    # Create a safe, isolated namespace dictionary for compilation
+                    namespace = {}
+                    try:
+                        # Dynamically compile and execute the code string into the namespace
+                        exec(code, namespace)
+                        func = namespace.get(name)
+                        if not func or not callable(func):
+                            raise ValueError(f"Compiled code did not contain a callable function named '{name}'")
+                        # Attach the source code so Tool.run() can extract it without inspect.getsource
+                        func.__source_code__ = code
+                    except Exception as code_exc:
+                        err_msg = str(code_exc)
+                        logger.error(f"Failed to dynamically compile code for tool '{name}': {err_msg}")
+                        def dummy_func(e=err_msg, **kwargs):
+                            raise NotImplementedError(f"Local tool '{name}' failed to compile from DB: {e}")
+                        func = dummy_func
+                else:
+                    def dummy_func(**kwargs):
+                        raise NotImplementedError(f"Local tool '{name}' has no 'code' in metadata.")
+                    func = dummy_func
                     
-                return Tool(name=name, description=description, func=dummy_func, schema=schema)
+                if tool_type == "host_tool":
+                    from orkestra.core.tools import HostTool
+                    return HostTool(name=name, description=description, func=func, schema=schema)
+                else:
+                    return Tool(name=name, description=description, func=func, schema=schema)
                 
         except Exception as e:
             logger.error(f"Failed to reconstruct tool from metadata: {e}")

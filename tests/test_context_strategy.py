@@ -51,7 +51,7 @@ async def test_token_summarization_strategy(memory_store):
     db_msgs = memory_store.get_messages("test_session")
     assert len(db_msgs) == 3 # Summary + last 2
 
-def dummy_long_func():
+def dummy_long_func(**kwargs):
     return "X" * 1000
 
 @pytest.mark.asyncio

@@ -1,9 +1,9 @@
 import os
-from orkestra.core.tools import Tool
+from orkestra.core.tools import HostTool
 
-def read_file_chunk_func(file_path: str, start_char: int, end_char: int, session_id: str) -> str:
+def read_file_chunk_func(file_path: str, start_char: int, end_char: int, artifact_dir: str) -> str:
     """Read a specific chunk of a file. Only allowed within the session's artifact directory."""
-    allowed_dir = os.path.abspath(f"/tmp/orkestra_artifacts/{session_id}")
+    allowed_dir = os.path.abspath(artifact_dir)
     target_path = os.path.abspath(file_path)
     
     # Sandboxing check
@@ -11,9 +11,21 @@ def read_file_chunk_func(file_path: str, start_char: int, end_char: int, session
         return f"Error: Permission denied. Can only read files inside {allowed_dir}"
         
     if not os.path.exists(target_path):
-        return f"Error: File not found at {target_path}"
+        return f"Error: File not found at {target_path}. The temporary artifact may have been deleted by the OS. Please autonomously call the original tool again to re-fetch the content, and then try reading it again."
         
     try:
+        file_size = os.path.getsize(target_path)
+        
+        # Support negative indexing (e.g. -2000 means 2000 chars from the end)
+        if start_char < 0:
+            start_char = max(0, file_size + start_char)
+        if end_char < 0:
+            end_char = max(0, file_size + end_char)
+            
+        # If end_char is still less than start_char, it's invalid
+        if end_char <= start_char:
+            return "Error: end_char must be greater than start_char"
+            
         with open(target_path, "r", encoding="utf-8") as f:
             f.seek(start_char)
             content = f.read(end_char - start_char)
@@ -21,8 +33,8 @@ def read_file_chunk_func(file_path: str, start_char: int, end_char: int, session
     except Exception as e:
         return f"Error reading file: {str(e)}"
 
-# We will need a factory to inject the session_id
-def get_read_file_chunk_tool(session_id: str) -> Tool:
+# We will need a factory to inject the artifact_dir
+def get_read_file_chunk_tool(artifact_dir: str) -> HostTool:
     schema = {
         "type": "function",
         "function": {
@@ -49,11 +61,11 @@ def get_read_file_chunk_tool(session_id: str) -> Tool:
         }
     }
     
-    # Create a partial-like wrapper that injects session_id
-    def wrapped_func(file_path: str, start_char: int, end_char: int):
-        return read_file_chunk_func(file_path, start_char, end_char, session_id)
+    # Create a partial-like wrapper that injects artifact_dir
+    def wrapped_func(file_path: str, start_char: int, end_char: int, **kwargs):
+        return read_file_chunk_func(file_path, start_char, end_char, artifact_dir)
         
-    return Tool(
+    return HostTool(
         name="read_file_chunk",
         description="Read a specific chunk of a truncated artifact file.",
         func=wrapped_func,
@@ -61,8 +73,8 @@ def get_read_file_chunk_tool(session_id: str) -> Tool:
         requires_approval=False
     )
 
-def get_search_tools_tool(agent) -> Tool:
-    def search_tools_func(query: str) -> str:
+def get_search_tools_tool(agent) -> HostTool:
+    def search_tools_func(query: str, **kwargs) -> str:
         """Search the tool registry for relevant tools."""
         tools = agent.tool_registry.search(query)
         if not tools:
@@ -99,7 +111,7 @@ def get_search_tools_tool(agent) -> Tool:
     # Needs a hack to inject the found tools into the Agent's active tools.
     # The Runner will handle parsing the tool execution to append to `agent.tools`.
     
-    return Tool(
+    return HostTool(
         name="search_tools",
         description="Search the tool registry for tools that can help with a specific task.",
         func=search_tools_func,

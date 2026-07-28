@@ -25,6 +25,14 @@ class AgentStepCompleted(Event):
     tool_calls: int
 
 @dataclass
+class TokenUsageReported(Event):
+    """Emitted when an LLM provider reports token usage."""
+    agent_name: str
+    session_id: str
+    prompt_tokens: int
+    completion_tokens: int
+
+@dataclass
 class ToolExecutionStarted(Event):
     """Emitted when a tool begins execution."""
     agent_name: str
@@ -43,12 +51,14 @@ class ToolExecutionCompleted(Event):
 class WorkflowStarted(Event):
     """Emitted when a runner begins an agent workflow."""
     agent_name: str
+    session_id: str
     max_iterations: int
 
 @dataclass
 class WorkflowCompleted(Event):
     """Emitted when a runner finishes an agent workflow."""
     agent_name: str
+    session_id: str
     total_iterations: int
 
 @dataclass
@@ -78,3 +88,35 @@ class HumanApprovalProvided(Event):
 class WorkflowPaused(Event):
     """Emitted when a workflow pauses execution (e.g. waiting for HITL)."""
     agent_name: str
+    
+@dataclass
+class HandoffRequested(Event):
+    """Fired when an agent uses the handoff tool to pass control to another agent."""
+    source_agent_name: str
+    target_agent_name: str
+    context_message: str
+    tool_call_id: str
+
+@dataclass
+class SubAgentStarted(Event):
+    """Fired when a manager agent spawns a sub-agent."""
+    manager_agent_name: str
+    sub_agent_name: str
+    sub_session_id: str
+    task_description: str
+
+@dataclass
+class SubAgentCompleted(Event):
+    """Fired when a sub-agent completes its task and returns the result to the manager."""
+    manager_agent_name: str
+    sub_agent_name: str
+    sub_session_id: str
+    result: str
+
+@dataclass
+class TaskCompletedEvent(Event):
+    """Fired when an asynchronous background task completes, used to wake up sleeping agents."""
+    agent_name: str
+    session_id: str
+    tool_call_id: str
+    result: str

@@ -40,8 +40,15 @@ class PostgresMemoryStore(BaseMemory):
     """
     def __init__(self, db_url: str):
         # Convert base postgresql:// URL to specific drivers if needed
-        sync_url = db_url.replace("postgresql://", "postgresql+psycopg2://")
-        async_url = db_url.replace("postgresql://", "postgresql+asyncpg://")
+        if db_url.startswith("postgresql://"):
+            sync_url = db_url.replace("postgresql://", "postgresql+psycopg2://")
+            async_url = db_url.replace("postgresql://", "postgresql+asyncpg://")
+        elif db_url.startswith("sqlite://"):
+            sync_url = db_url
+            async_url = db_url.replace("sqlite://", "sqlite+aiosqlite://")
+        else:
+            sync_url = db_url
+            async_url = db_url
         
         # Sync engine
         self.engine = create_engine(sync_url, pool_pre_ping=True)
@@ -146,3 +153,10 @@ class PostgresMemoryStore(BaseMemory):
             if model:
                 return model.state
             return {}
+
+    async def aclear_checkpoint(self, session_id: str) -> None:
+        async with self.AsyncSessionLocal() as session:
+            from sqlalchemy import delete
+            stmt = delete(AgentStateModel).where(AgentStateModel.session_id == session_id)
+            await session.execute(stmt)
+            await session.commit()

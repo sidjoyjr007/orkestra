@@ -27,8 +27,10 @@ def _publish_retry_event(retry_state):
         provider.event_bus.publish(event)
     else:
         # Fallback to standard logging if no event bus is configured
-        print(
-            f"WARNING: Retrying LLM call in {retry_state.idle_for} seconds as it raised {str(retry_state.outcome.exception())}"
+        import logging
+        logger = logging.getLogger("orkestra.providers.gemini_provider")
+        logger.warning(
+            f"Retrying LLM call in {retry_state.idle_for} seconds as it raised {str(retry_state.outcome.exception())}"
         )
 
 with_retry = retry(
@@ -123,10 +125,35 @@ class GeminiProvider(BaseProvider):
                 # Convert the JSON schema to Gemini's Schema object
                 properties = {}
                 for k, v in func.get("parameters", {}).get("properties", {}).items():
-                    properties[k] = types.Schema(
-                        type=types.Type.STRING if v.get("type") == "string" else types.Type.INTEGER,
-                        description=v.get("description", "")
-                    )
+                    prop_type = v.get("type", "string").lower()
+                    if prop_type == "string":
+                        t = types.Type.STRING
+                    elif prop_type in ("integer", "int"):
+                        t = types.Type.INTEGER
+                    elif prop_type in ("number", "float"):
+                        t = types.Type.NUMBER
+                    elif prop_type == "boolean":
+                        t = types.Type.BOOLEAN
+                    elif prop_type == "array":
+                        t = types.Type.ARRAY
+                    elif prop_type == "object":
+                        t = types.Type.OBJECT
+                    else:
+                        t = types.Type.STRING
+                        
+                    schema_kwargs = {
+                        "type": t,
+                        "description": v.get("description", "")
+                    }
+                    
+                    if t == types.Type.ARRAY and "items" in v:
+                        item_type = v["items"].get("type", "string").lower()
+                        if item_type == "string":
+                            schema_kwargs["items"] = types.Schema(type=types.Type.STRING)
+                        elif item_type in ("integer", "int"):
+                            schema_kwargs["items"] = types.Schema(type=types.Type.INTEGER)
+                            
+                    properties[k] = types.Schema(**schema_kwargs)
                 
                 schema = types.Schema(
                     type=types.Type.OBJECT,
@@ -137,7 +164,7 @@ class GeminiProvider(BaseProvider):
                 gemini_funcs.append(
                     types.FunctionDeclaration(
                         name=func["name"],
-                        description=func["description"],
+                        description=func.get("description", ""),
                         parameters=schema
                     )
                 )
@@ -205,13 +232,17 @@ class GeminiProvider(BaseProvider):
             tool_calls=tool_calls
         )
         
-        usage = {}
-        if response.usage_metadata:
-            usage = {
-                "prompt_tokens": response.usage_metadata.prompt_token_count or 0,
-                "completion_tokens": response.usage_metadata.candidates_token_count or 0,
-                "total_tokens": response.usage_metadata.total_token_count or 0
-            }
+        # Get usage metadata safely
+        usage_metadata = response.usage_metadata
+        prompt_tokens = getattr(usage_metadata, "prompt_token_count", 0) or 0
+        completion_tokens = getattr(usage_metadata, "candidates_token_count", 0) or 0
+        total_tokens = getattr(usage_metadata, "total_token_count", 0) or 0
+        
+        usage = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens
+        }
 
         return Response(
             message=message,
@@ -235,7 +266,6 @@ class GeminiProvider(BaseProvider):
         gemini_tools = None
         if tools:
             gemini_tools = self._convert_tools_to_gemini(tools)
-            
         stream = self.client.models.generate_content_stream(
             model=self.model_name,
             contents=formatted_messages,
@@ -283,7 +313,9 @@ class GeminiProvider(BaseProvider):
         gemini_tools = None
         if tools:
             gemini_tools = self._convert_tools_to_gemini(tools)
-            
+        print("formatted_messages", formatted_messages)
+        print("system_instruction", system_instruction)
+        print("tools", gemini_tools)
         response = await self.client.aio.models.generate_content(
             model=self.model_name,
             contents=formatted_messages,
@@ -309,7 +341,7 @@ class GeminiProvider(BaseProvider):
             ]
             
         content = None
-        if response.candidates and response.candidates[0].content:
+        if response.candidates and response.candidates[0].content and getattr(response.candidates[0].content, 'parts', None):
             parts = []
             for part in response.candidates[0].content.parts:
                 if getattr(part, "text", None):
@@ -326,9 +358,9 @@ class GeminiProvider(BaseProvider):
         usage = {}
         if response.usage_metadata:
             usage = {
-                "prompt_tokens": response.usage_metadata.prompt_token_count,
-                "completion_tokens": response.usage_metadata.candidates_token_count,
-                "total_tokens": response.usage_metadata.total_token_count
+                "prompt_tokens": getattr(response.usage_metadata, "prompt_token_count", 0) or 0,
+                "completion_tokens": getattr(response.usage_metadata, "candidates_token_count", 0) or 0,
+                "total_tokens": getattr(response.usage_metadata, "total_token_count", 0) or 0
             }
 
         return Response(

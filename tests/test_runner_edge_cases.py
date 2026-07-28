@@ -7,8 +7,8 @@ from orkestra.workflows.runner import AgentRunner
 from orkestra.core.exceptions import MaxIterationsError
 from tests.conftest import MockProvider
 
-def faulty_func():
-    raise ValueError("The server is on fire!")
+def faulty_func(**kwargs):
+    raise RuntimeError("The server is on fire!")
 
 faulty_tool = Tool(
     name="faulty",

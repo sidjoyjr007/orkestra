@@ -4,8 +4,9 @@ import os
 import tempfile
 import subprocess
 import asyncio
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 import hashlib
+from orkestra.core.exceptions import WorkflowPausedError
 
 class Tool:
     """
@@ -51,7 +52,10 @@ class Tool:
     def _execute_in_docker(self, kwargs: Dict[str, Any]) -> str:
         import textwrap
         try:
-            func_source = textwrap.dedent(inspect.getsource(self.func))
+            if hasattr(self.func, '__source_code__'):
+                func_source = self.func.__source_code__
+            else:
+                func_source = textwrap.dedent(inspect.getsource(self.func))
         except Exception as e:
             return json.dumps({"error": f"Could not extract source code for {self.name}: {str(e)}"})
             
@@ -137,4 +141,22 @@ if __name__ == '__main__':
     async def arun(self, **kwargs) -> str:
         # Run the synchronous docker execution in a thread pool to avoid blocking the event loop
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._execute_in_docker, kwargs)
+        return await asyncio.to_thread(self._execute_in_docker, kwargs)
+
+class HostTool(Tool):
+    """
+    A tool that executes natively on the host machine instead of inside a Docker Sandbox.
+    Use this for local IDE agents or internal servers where you want the agent to have direct filesystem access.
+    """
+    async def arun(self, **kwargs) -> str:
+        # Strip internal Orkestra kwargs before passing to the user's function
+        clean_kwargs = {k: v for k, v in kwargs.items() if not k.startswith("_")}
+        try:
+            if asyncio.iscoroutinefunction(self.func):
+                return await self.func(**clean_kwargs)
+            else:
+                return self.func(**clean_kwargs)
+        except WorkflowPausedError:
+            raise
+        except Exception as e:
+            return f"Error executing native tool '{self.name}': {str(e)}"

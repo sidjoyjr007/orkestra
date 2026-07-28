@@ -29,18 +29,24 @@ class AgentRunner:
         if not self.agent.messages:
             return []
         
-        last_msg = self.agent.messages[-1]
-        if last_msg.role != "assistant" or not last_msg.tool_calls:
+        # Find the last assistant message
+        last_assistant_msg = None
+        for msg in reversed(self.agent.messages):
+            if msg.role == "assistant":
+                last_assistant_msg = msg
+                break
+                
+        if not last_assistant_msg or not last_assistant_msg.tool_calls:
             return []
             
         answered_ids = {m.tool_call_id for m in self.agent.messages if m.role == "tool" and m.tool_call_id}
-        return [tc for tc in last_msg.tool_calls if tc.id not in answered_ids]
+        return [tc for tc in last_assistant_msg.tool_calls if tc.id not in answered_ids]
 
     def run(self, **kwargs):
         """Run the agent loop synchronously."""
         logger.info(f"Starting synchronous run for agent '{self.agent.name}' (ID: {self.agent.id})")
         if self.event_bus:
-            self.event_bus.publish(WorkflowStarted(agent_name=self.agent.name, session_id=self.agent.session_id))
+            self.event_bus.publish(WorkflowStarted(agent_name=self.agent.name, session_id=self.agent.session_id, max_iterations=self.agent.max_iterations))
             
         for i in range(self.agent.max_iterations):
             logger.debug(f"Agent '{self.agent.name}' iteration {i+1}/{self.agent.max_iterations}")
@@ -53,7 +59,7 @@ class AgentRunner:
             
             if not response.message.tool_calls:
                 if self.event_bus:
-                    self.event_bus.publish(WorkflowCompleted(agent_name=self.agent.name, total_iterations=i+1))
+                    self.event_bus.publish(WorkflowCompleted(agent_name=self.agent.name, session_id=self.agent.session_id, total_iterations=i+1))
                 import asyncio
                 if self.agent.memory:
                     # Sync fallback
@@ -72,7 +78,7 @@ class AgentRunner:
         """Run the agent loop asynchronously."""
         logger.info(f"Starting asynchronous run for agent '{self.agent.name}' (ID: {self.agent.id})")
         if self.event_bus:
-            await self.event_bus.apublish(WorkflowStarted(agent_name=self.agent.name, session_id=self.agent.session_id))
+            await self.event_bus.apublish(WorkflowStarted(agent_name=self.agent.name, session_id=self.agent.session_id, max_iterations=self.agent.max_iterations))
             
         for i in range(self.agent.max_iterations):
             logger.debug(f"Agent '{self.agent.name}' iteration {i+1}/{self.agent.max_iterations}")
@@ -89,7 +95,7 @@ class AgentRunner:
             
             if not response.message.tool_calls:
                 if self.event_bus:
-                    await self.event_bus.apublish(WorkflowCompleted(agent_name=self.agent.name, total_iterations=i+1))
+                    await self.event_bus.apublish(WorkflowCompleted(agent_name=self.agent.name, session_id=self.agent.session_id, total_iterations=i+1))
                 if self.agent.memory:
                     await self.agent.memory.asave_checkpoint(self.agent.session_id, AgentStateSerializer.to_dict(self.agent))
                 return response

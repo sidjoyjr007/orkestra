@@ -1,5 +1,6 @@
 import pytest
 import asyncio
+from unittest.mock import MagicMock, AsyncMock
 from typing import List, Dict, Any, Optional
 from orkestra.core.messages import Message, ToolCall, Response, ResponseChunk
 from orkestra.providers.base import BaseProvider
