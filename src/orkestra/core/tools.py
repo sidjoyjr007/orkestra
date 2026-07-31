@@ -1,6 +1,7 @@
 import inspect
 import json
 import os
+import sys
 import tempfile
 import subprocess
 import asyncio
@@ -13,7 +14,7 @@ class Tool:
     A tool that runs its function in an isolated Docker container with dynamic dependencies.
     Provides strict security sandboxing (no host file system access).
     """
-    def __init__(self, name: str, description: str, func: Callable, schema: Dict[str, Any], dependencies: List[str] = None, timeout_seconds: int = 60, requires_approval: bool = False, max_result_length: int = None, network_access: bool = False):
+    def __init__(self, name: str, description: str, func: Callable, schema: Dict[str, Any], dependencies: List[str] = None, timeout_seconds: int = 60, requires_approval: bool = False, max_result_length: int = 24000, network_access: bool = False):
         self.name = name
         self.description = description
         self.func = func
@@ -40,8 +41,17 @@ class Tool:
         with tempfile.TemporaryDirectory() as temp_dir:
             dockerfile_content = "FROM python:3.11-slim\nWORKDIR /app\n"
             if self.dependencies:
-                deps = " ".join(self.dependencies)
-                dockerfile_content += f"RUN pip install --no-cache-dir {deps}\n"
+                # Filter out standard library modules
+                import sys
+                valid_deps = []
+                for d in self.dependencies:
+                    base_pkg = d.split('==')[0].split('[')[0].split('.')[0]
+                    if base_pkg not in sys.stdlib_module_names:
+                        valid_deps.append(d)
+                
+                if valid_deps:
+                    deps = " ".join(valid_deps)
+                    dockerfile_content += f"RUN pip install --no-cache-dir {deps}\n"
                 
             dockerfile_path = os.path.join(temp_dir, "Dockerfile")
             with open(dockerfile_path, "w") as f:
@@ -62,10 +72,14 @@ class Tool:
         try:
             self._ensure_image()
         except subprocess.CalledProcessError as e:
-            return json.dumps({"error": f"Failed to build Docker sandbox for {self.name}: {e.stderr.decode()}"})
+            err_msg = f"Failed to build Docker sandbox for {self.name}: {e.stderr.decode()}"
+            print(f"Sandbox Build Error: {err_msg}", file=sys.stderr)
+            return json.dumps({"error": err_msg})
 
+        # Strip internal Orkestra kwargs before passing to the user's function
+        clean_kwargs = {k: v for k, v in kwargs.items() if not k.startswith("_")}
         # Double dump to safely inject JSON string literal into the python script
-        safe_kwargs = json.dumps(json.dumps(kwargs))
+        safe_kwargs = json.dumps(json.dumps(clean_kwargs))
         func_name = self.func.__name__
         
         script = f"""
@@ -123,7 +137,10 @@ if __name__ == '__main__':
             return json.dumps({"error": f"Tool execution timed out after {self.timeout_seconds} seconds."})
             
         if process.returncode != 0:
-            return json.dumps({"error": f"Tool execution failed: {process.stderr}"})
+            err_msg = f"Tool execution failed: {process.stderr}"
+            print(f"Sandbox Run Error: {err_msg}", file=sys.stderr)
+            with open("/tmp/sandbox_errors.log", "a") as f: f.write(err_msg + "\\n")
+            return json.dumps({"error": err_msg})
             
         try:
             output = json.loads(process.stdout)
@@ -133,7 +150,10 @@ if __name__ == '__main__':
             result = output.get("result")
             return result if isinstance(result, str) else json.dumps(result)
         except json.JSONDecodeError:
-            return json.dumps({"error": "Failed to parse tool output", "stdout": process.stdout})
+            err_msg = "Failed to parse tool output"
+            print(f"Sandbox Parse Error: {err_msg}. Stdout: {process.stdout}", file=sys.stderr)
+            with open("/tmp/sandbox_errors.log", "a") as f: f.write(err_msg + f" Stdout: {process.stdout}\\n")
+            return json.dumps({"error": err_msg, "stdout": process.stdout})
 
     def run(self, **kwargs) -> str:
         return self._execute_in_docker(kwargs)

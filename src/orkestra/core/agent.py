@@ -4,13 +4,26 @@ from orkestra.core.messages import Message, Response, ResponseChunk
 from orkestra.providers.base import BaseProvider
 from orkestra.memory.base import BaseMemory
 from orkestra.events.bus import EventBus
-from orkestra.events.base import AgentStepStarted, AgentStepCompleted, TokenUsageReported
+from orkestra.events.base import AgentStepStarted, AgentStepCompleted, TokenUsageReported, GuardrailTriggered
 from orkestra.core.context import CompactionStrategy, KeepAllStrategy
 from orkestra.core.builtin_tools import get_read_file_chunk_tool
 from orkestra.core.tools import Tool
 from orkestra.workspace.base import BaseWorkspaceStore
 from orkestra.workspace.tools import get_planning_tools
 from orkestra.guardrails.base import BaseGuardrail, GuardrailStage, GuardrailAction
+
+STRICT_INSTRUCTIONS = """
+STRICT OPERATIONAL RULES:
+
+1. TOOL EXCLUSIVITY & NO HALLUCINATION: You MUST rely EXCLUSIVELY on the provided tools for factual, current, or technical information. If a tool does not provide the information needed, explicitly state that you do not have it. NEVER hallucinate facts, file paths, or data.
+2. DISCOVERY MANDATE: Operate on a **Verify-Then-Execute** basis. Do not guess database schemas, file structures, or specific IDs. Use your tools to list and verify exact names before querying.
+3. TOOL DISCOVERY (SEARCH-ON-DEMAND): The **YOUR CAPABILITIES** section lists tools you are authorized to use, but these are only 'Discovery Headers' without parameters. You CANNOT call a tool if you only see it in CAPABILITIES. You MUST first call `search_tools` to 'load' the full JSON schema (parameters and usage) into your context. Once loaded, the tool will appear in **AVAILABLE TOOLS** and you can then use it. This keeps your working memory clean while giving you on-demand access to all your authorized tools.
+4. WORKSPACE PLANNING: For complex or multi-step requests, your very first action MUST be to use `create_plan` to outline your subtasks. 
+5. STRICT PROGRESSION: As you work through a plan, you MUST use the `batch_update_tasks` tool to transition the status of tasks. You should bundle updates (e.g., marking one task DONE and the next IN_PROGRESS in a single call). You are strictly FORBIDDEN from finishing your turn until all tasks in the active plan are marked as `DONE`, `FAILED`, or `BLOCKED`.
+6. TRUNCATION HANDLING (ZERO DATA LOSS): If a tool result contains the `[TRUNCATED]` marker, it means the output exceeded the maximum length and was saved to disk. You MUST NOT guess the hidden middle parts. You MUST use the `read_file_chunk` tool on the provided file path to fetch the missing byte ranges before proceeding.
+7. DIRECT OUTPUT: Do not use `<thinking>` tags or wrap your internal thoughts in special XML. Provide your final, polished response directly in clean Markdown. Do not mention internal systems like `create_plan` or `search_tools` to the user, and NEVER leak internal artifact paths (e.g., `/tmp/orkestra_artifacts/...`) or system truncation messages in your final response to the user.
+8. EXIT GUARD: You are FORBIDDEN from finishing the session if any tasks remain in a 'TODO' or 'IN_PROGRESS' state in your active plan. If you try to exit without properly using `batch_update_tasks` to transition all tasks to a terminal state (DONE, FAILED, or BLOCKED), the system will block you and force a correction.
+"""
 
 class Agent:
     """
@@ -50,7 +63,17 @@ class Agent:
         """
         self.name = name
         self.description = description
-        self.system_prompt = system_prompt
+        capabilities_text = ""
+        if tools:
+            capabilities_text = "\n\nYOUR CAPABILITIES (Discovery Headers):\n"
+            for t in tools:
+                desc = str(t.description).split('\n')[0][:100] if t.description else "No description."
+                capabilities_text += f"- {t.name}: {desc}\n"
+                
+        if STRICT_INSTRUCTIONS not in system_prompt:
+            self.system_prompt = f"{system_prompt}{capabilities_text}\n\n{STRICT_INSTRUCTIONS}"
+        else:
+            self.system_prompt = system_prompt
         self.provider = provider
         self.memory = memory
         self.session_id = session_id
@@ -72,7 +95,8 @@ class Agent:
                 from orkestra.core.tool_registry import ToolRegistry
                 self.tool_registry = ToolRegistry(
                     url=self.tool_registry_url, 
-                    agent_id=self.id
+                    agent_id=self.id,
+                    event_bus=self.event_bus
                 )
             except ImportError:
                 pass
@@ -106,7 +130,7 @@ class Agent:
         else:
             self.messages = messages or []
             
-    def clone(self) -> 'Agent':
+    def clone(self, session_id: Optional[str] = None) -> 'Agent':
         """
         Creates a deep-ish clone of the agent for use in sub-sessions or handoffs.
         Ensures that memory (messages) and dynamically injected tools do not leak 
@@ -128,7 +152,7 @@ class Agent:
             messages=cloned_messages,
             max_iterations=self.max_iterations,
             memory=self.memory, # Shared (relies on session_id for isolation)
-            session_id=self.session_id,
+            session_id=session_id or self.session_id,
             event_bus=self.event_bus, # Shared
             compaction=self.compaction,
             workspace=self.workspace, # Shared
@@ -194,6 +218,14 @@ class Agent:
                     prepared[0].content += plan_str
                 else:
                     prepared.insert(0, Message(role="system", content=self.system_prompt + plan_str))
+
+        # Dynamically inject Tool RAG instruction if enabled
+        if self.tool_registry:
+            rag_str = "\n\nIMPORTANT: You have access to a vast registry of tools, but they are NOT loaded by default. You MUST use the `search_tools` function to search for and load capabilities into your context before you can use them. If you lack a tool for a task, ALWAYS search for it first!"
+            if prepared and prepared[0].role == "system":
+                prepared[0].content += rag_str
+            else:
+                prepared.insert(0, Message(role="system", content=self.system_prompt + rag_str))
                     
         return prepared
         
@@ -217,6 +249,11 @@ class Agent:
                 if active_plan:
                     plan_str = f"\n\nCURRENT PLAN:\n{active_plan.to_markdown()}"
                     prepared[0].content += plan_str
+                    
+            if self.tool_registry:
+                rag_str = "\n\nIMPORTANT: You have access to a vast registry of tools, but they are NOT loaded by default. You MUST use the `search_tools` function to search for and load capabilities into your context before you can use them. If you lack a tool for a task, ALWAYS search for it first!"
+                prepared[0].content += rag_str
+                
             return prepared
             
         # Fallback for sync `step`
@@ -282,12 +319,39 @@ class Agent:
                 res = await g.aevaluate(last_msg.content, agent=self)
                 if not res.passed:
                     if res.action == GuardrailAction.BLOCK:
+                        if self.event_bus:
+                            await self.event_bus.apublish(GuardrailTriggered(
+                                agent_name=self.name,
+                                session_id=self.session_id,
+                                stage=GuardrailStage.INPUT.value,
+                                action_taken=GuardrailAction.BLOCK.value,
+                                message=res.message,
+                                modified_content=res.modified_content
+                            ))
                         raise Exception(f"Input blocked by guardrail: {res.message}")
                     elif res.action == GuardrailAction.REDACT:
+                        if self.event_bus:
+                            await self.event_bus.apublish(GuardrailTriggered(
+                                agent_name=self.name,
+                                session_id=self.session_id,
+                                stage=GuardrailStage.INPUT.value,
+                                action_taken=GuardrailAction.REDACT.value,
+                                message=res.message,
+                                modified_content=res.modified_content
+                            ))
                         last_msg.content = res.modified_content
                     # FEEDBACK at INPUT stage doesn't make much sense since the user typed it, 
                     # but if specified we can append it as a system message.
                     elif res.action == GuardrailAction.FEEDBACK:
+                        if self.event_bus:
+                            await self.event_bus.apublish(GuardrailTriggered(
+                                agent_name=self.name,
+                                session_id=self.session_id,
+                                stage=GuardrailStage.INPUT.value,
+                                action_taken=GuardrailAction.FEEDBACK.value,
+                                message=res.message,
+                                modified_content=res.modified_content
+                            ))
                         await self.aadd_message(Message(role="system", content=f"SYSTEM WARNING (User Input): {res.message}"))
                         
         prepared_messages = await self._aprepare_messages(self.messages)
@@ -305,7 +369,7 @@ class Agent:
             active_plan = await self.workspace.aget_active_plan(self.session_id)
             
             # We want to keep tools clean, so let's filter out old planning tools first
-            self.tools = [t for t in self.tools if t.name not in ["create_plan", "update_task", "add_task"]]
+            self.tools = [t for t in self.tools if t.name not in ["create_plan", "batch_update_tasks", "add_task"]]
             
             # Inject only what's needed
             for pt in planning_tools:
@@ -328,6 +392,7 @@ class Agent:
             
         response = await self.provider.agenerate(messages=prepared_messages, **gen_kwargs)
         
+        system_warnings = []
         # Run OUTPUT guardrails on the LLM's response
         if self.guardrails and response.message.content:
             output_guardrails = [g for g in self.guardrails if g.stage == GuardrailStage.OUTPUT]
@@ -335,17 +400,46 @@ class Agent:
                 res = await g.aevaluate(response.message.content, agent=self)
                 if not res.passed:
                     if res.action == GuardrailAction.BLOCK:
+                        if self.event_bus:
+                            await self.event_bus.apublish(GuardrailTriggered(
+                                agent_name=self.name,
+                                session_id=self.session_id,
+                                stage=GuardrailStage.OUTPUT.value,
+                                action_taken=GuardrailAction.BLOCK.value,
+                                message=res.message,
+                                modified_content=res.modified_content
+                            ))
                         # Clear the message so it doesn't get saved to memory
                         response.message.content = ""
                         response.message.tool_calls = []
                         raise Exception(f"Output blocked by guardrail: {res.message}")
                     elif res.action == GuardrailAction.REDACT:
+                        if self.event_bus:
+                            await self.event_bus.apublish(GuardrailTriggered(
+                                agent_name=self.name,
+                                session_id=self.session_id,
+                                stage=GuardrailStage.OUTPUT.value,
+                                action_taken=GuardrailAction.REDACT.value,
+                                message=res.message,
+                                modified_content=res.modified_content
+                            ))
                         response.message.content = res.modified_content
                     elif res.action == GuardrailAction.FEEDBACK:
+                        if self.event_bus:
+                            await self.event_bus.apublish(GuardrailTriggered(
+                                agent_name=self.name,
+                                session_id=self.session_id,
+                                stage=GuardrailStage.OUTPUT.value,
+                                action_taken=GuardrailAction.FEEDBACK.value,
+                                message=res.message,
+                                modified_content=res.modified_content
+                            ))
                         # Inject feedback warning so the LLM sees it on the next turn
-                        await self.aadd_message(Message(role="system", content=f"SYSTEM WARNING (Your Output): {res.message}"))
+                        system_warnings.append(f"SYSTEM WARNING (Your Output): {res.message}")
                         
         await self.aadd_message(response.message)
+        for warning in system_warnings:
+            await self.aadd_message(Message(role="system", content=warning))
         
         # Track token usage
         p_tokens = response.usage.get("prompt_tokens", 0)
@@ -367,24 +461,6 @@ class Agent:
                 tool_calls=len(response.message.tool_calls) if response.message.tool_calls else 0
             ))
             
-        # Run OUTPUT guardrails on the generated response
-        if response.message.content and self.guardrails:
-            output_guardrails = [g for g in self.guardrails if g.stage == GuardrailStage.OUTPUT]
-            for g in output_guardrails:
-                res = await g.aevaluate(response.message.content, agent=self)
-                if not res.passed:
-                    if res.action == GuardrailAction.BLOCK:
-                        raise Exception(f"Output blocked by guardrail: {res.message}")
-                    elif res.action == GuardrailAction.REDACT:
-                        response.message.content = res.modified_content
-                        # Need to update the stored message as well
-                        self.messages[-1].content = res.modified_content
-                    elif res.action == GuardrailAction.FEEDBACK:
-                        # Agent generated bad output, steer it
-                        warning = f"SYSTEM WARNING (Output Feedback): {res.message}"
-                        await self.aadd_message(Message(role="system", content=warning))
-                        # We return the response anyway, but next turn it will see the warning
-                        
         return response
 
     def stream(self, **kwargs) -> Iterator[ResponseChunk]:
@@ -394,9 +470,40 @@ class Agent:
             kwargs["tools"] = [tool.schema for tool in self.tools]
         return self.provider.generate_stream(messages=prepared_messages, **kwargs)
 
-    def astream(self, **kwargs) -> AsyncIterator[ResponseChunk]:
+    async def astream(self, **kwargs) -> AsyncIterator[ResponseChunk]:
         # Stream the agents response asynchronously.
-        prepared_messages = self._prepare_messages(self.messages)
+        prepared_messages = await self._aprepare_messages(self.messages)
+        
+        # Check for TRUNCATED flag to dynamically inject read_file_chunk tool
+        needs_read_tool = any("[TRUNCATED]" in (m.content or "") for m in prepared_messages)
+        if needs_read_tool:
+            has_read_tool = any(t.name == "read_file_chunk" for t in self.tools)
+            if not has_read_tool:
+                self.tools.append(get_read_file_chunk_tool(self.artifact_dir))
+                
+        # Dynamically inject planning tools based on workspace state
+        if self.workspace:
+            from orkestra.workspace.tools import get_planning_tools
+            planning_tools = get_planning_tools(self.session_id, self.workspace)
+            active_plan = await self.workspace.aget_active_plan(self.session_id)
+            
+            # We want to keep tools clean, so let's filter out old planning tools first
+            self.tools = [t for t in self.tools if t.name not in ["create_plan", "batch_update_tasks", "add_task"]]
+            
+            # Inject only what's needed
+            for pt in planning_tools:
+                if active_plan:
+                    # If there IS an active plan, we need all tools
+                    self.tools.append(pt)
+                else:
+                    # If NO active plan, we only need create_plan
+                    if pt.name == "create_plan":
+                        self.tools.append(pt)
+                        
         if self.tools:
             kwargs["tools"] = [tool.schema for tool in self.tools]
-        return self.provider.agenerate_stream(messages=prepared_messages, **kwargs)
+        
+        # We need to iterate over the async generator properly
+        async for chunk in self.provider.agenerate_stream(messages=prepared_messages, **kwargs):
+            yield chunk
+

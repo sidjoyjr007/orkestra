@@ -29,17 +29,26 @@ class AgentRunner:
         if not self.agent.messages:
             return []
         
-        # Find the last assistant message
-        last_assistant_msg = None
-        for msg in reversed(self.agent.messages):
+        # Find the last assistant message and its index
+        last_assistant_idx = None
+        for idx, msg in enumerate(reversed(self.agent.messages)):
             if msg.role == "assistant":
-                last_assistant_msg = msg
+                last_assistant_idx = len(self.agent.messages) - 1 - idx
                 break
                 
-        if not last_assistant_msg or not last_assistant_msg.tool_calls:
+        if last_assistant_idx is None:
             return []
             
-        answered_ids = {m.tool_call_id for m in self.agent.messages if m.role == "tool" and m.tool_call_id}
+        last_assistant_msg = self.agent.messages[last_assistant_idx]
+        if not last_assistant_msg.tool_calls:
+            return []
+            
+        # Answered tool call IDs must come after the assistant message that requested them
+        answered_ids = {
+            m.tool_call_id 
+            for m in self.agent.messages[last_assistant_idx + 1:] 
+            if m.role == "tool" and m.tool_call_id
+        }
         return [tc for tc in last_assistant_msg.tool_calls if tc.id not in answered_ids]
 
     def run(self, **kwargs):
@@ -50,6 +59,11 @@ class AgentRunner:
             
         for i in range(self.agent.max_iterations):
             logger.debug(f"Agent '{self.agent.name}' iteration {i+1}/{self.agent.max_iterations}")
+            
+            # Semantic Tool Routing (Tool RAG) Pre-Step
+            if hasattr(self.agent, 'tool_registry') and self.agent.tool_registry:
+                self.agent.tool_registry.inject_semantic_tools(self.agent)
+                
             unanswered = self._get_unanswered_tools()
             if unanswered:
                 self.executor.execute(unanswered)
@@ -82,14 +96,15 @@ class AgentRunner:
             
         for i in range(self.agent.max_iterations):
             logger.debug(f"Agent '{self.agent.name}' iteration {i+1}/{self.agent.max_iterations}")
+            
+            # Semantic Tool Routing (Tool RAG) Pre-Step
+            if hasattr(self.agent, 'tool_registry') and self.agent.tool_registry:
+                await self.agent.tool_registry.ainject_semantic_tools(self.agent)
+                
             unanswered = self._get_unanswered_tools()
             if unanswered:
                 await self.executor.aexecute(unanswered)
                 continue
-                
-            # Semantic Tool Routing (Tool RAG) Pre-Step
-            if hasattr(self.agent, 'tool_registry') and self.agent.tool_registry:
-                self.agent.tool_registry.inject_semantic_tools(self.agent)
                 
             response = await self.agent.astep(**kwargs)
             

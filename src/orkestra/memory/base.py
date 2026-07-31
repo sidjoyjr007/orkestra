@@ -10,6 +10,9 @@ class BaseMemory(ABC):
     an agent's conversation history across sessions.
     """
     
+    def __init__(self, event_bus: 'Optional[Any]' = None):
+        self.event_bus = event_bus
+
     @abstractmethod
     def add_message(self, session_id: str, message: Message) -> None:
         """

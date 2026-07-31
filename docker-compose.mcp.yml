@@ -1,0 +1,12 @@
+version: '3.8'
+services:
+  github-mcp:
+    image: node:20-slim
+    container_name: github-mcp
+    ports:
+      - "8080:8080"
+    environment:
+      # You can edit this token directly here and restart the container
+      - GITHUB_PERSONAL_ACCESS_TOKEN=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
+    command: >
+      npx -y mcp-proxy --port 8080 -- npx -y @modelcontextprotocol/server-github

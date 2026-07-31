@@ -1,11 +1,12 @@
 import json
-from typing import Optional
+from typing import Optional, Any
 from sqlalchemy import Column, Integer, String, JSON
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.future import select
 
 from orkestra.workspace.base import BaseWorkspaceStore, Plan
+from orkestra.events.base import WorkspaceReadEvent, WorkspaceWrittenEvent
 
 Base = declarative_base()
 
@@ -18,7 +19,8 @@ class PlanModel(Base):
     plan_data = Column(JSON, nullable=False)
 
 class PostgresWorkspaceStore(BaseWorkspaceStore):
-    def __init__(self, db_url: str):
+    def __init__(self, db_url: str, event_bus: Optional[Any] = None):
+        super().__init__(event_bus)
         if db_url.startswith("postgres://"):
             db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
         elif db_url.startswith("postgresql://"):
@@ -46,6 +48,9 @@ class PostgresWorkspaceStore(BaseWorkspaceStore):
             result = await session.execute(stmt)
             model = result.scalars().first()
             
+            if self.event_bus:
+                self.event_bus.publish(WorkspaceReadEvent(session_id=session_id, items_retrieved=1 if model else 0))
+            
             if not model:
                 return None
                 
@@ -53,22 +58,16 @@ class PostgresWorkspaceStore(BaseWorkspaceStore):
             
     async def asave_plan(self, plan: Plan) -> None:
         async with self.async_session() as session:
-            # If creating a new active plan, archive any existing ones first
-            if plan.status == "ACTIVE":
-                stmt = select(PlanModel).where(
-                    PlanModel.session_id == plan.session_id,
-                    PlanModel.status == "ACTIVE"
-                )
-                result = await session.execute(stmt)
-                existing_active = result.scalars().all()
-                for e in existing_active:
-                    e.status = "ARCHIVED"
+            # Archive any existing active plan snapshots
+            stmt = select(PlanModel).where(
+                PlanModel.session_id == plan.session_id,
+                PlanModel.status == "ACTIVE"
+            )
+            result = await session.execute(stmt)
+            existing_active = result.scalars().all()
+            for e in existing_active:
+                e.status = "ARCHIVED"
             
-            # Since we don't track plan IDs inherently in the Plan object easily,
-            # we just insert a new state record or we could update if we tracked ID.
-            # To keep history, we can just insert the new state. 
-            # Or better, we can just keep one row per plan. 
-            # Let's just insert the new snapshot.
             new_model = PlanModel(
                 session_id=plan.session_id,
                 status=plan.status,
@@ -76,6 +75,9 @@ class PostgresWorkspaceStore(BaseWorkspaceStore):
             )
             session.add(new_model)
             await session.commit()
+            
+            if self.event_bus:
+                self.event_bus.publish(WorkspaceWrittenEvent(session_id=plan.session_id, action="save_plan"))
             
     async def aarchive_active_plan(self, session_id: str) -> None:
         async with self.async_session() as session:
@@ -89,3 +91,6 @@ class PostgresWorkspaceStore(BaseWorkspaceStore):
                 e.status = "ARCHIVED"
             
             await session.commit()
+            
+            if self.event_bus:
+                self.event_bus.publish(WorkspaceWrittenEvent(session_id=session_id, action="archive_plan"))

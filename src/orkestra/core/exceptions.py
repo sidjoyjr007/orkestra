@@ -28,7 +28,11 @@ class MaxIterationsError(OrkestraError):
 
 class WorkflowPausedError(OrkestraError):
     """Raised when an agent workflow is paused (e.g. for human approval)."""
-    pass
+    def __init__(self, message: str, tool_name: str = None, tool_call_id: str = None, tool_args: dict = None):
+        super().__init__(message)
+        self.tool_name = tool_name
+        self.tool_call_id = tool_call_id
+        self.tool_args = tool_args
 
 class HandoffException(WorkflowPausedError):
     """Raised specifically when a handoff tool is invoked to halt the current agent."""

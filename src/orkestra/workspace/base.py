@@ -1,5 +1,5 @@
 import abc
-from typing import List, Optional
+from typing import List, Optional, Any
 from pydantic import BaseModel, Field
 
 class Task(BaseModel):
@@ -27,6 +27,9 @@ class Plan(BaseModel):
         return "\n".join(md)
 
 class BaseWorkspaceStore(abc.ABC):
+    def __init__(self, event_bus: 'Optional[Any]' = None):
+        self.event_bus = event_bus
+
     @abc.abstractmethod
     async def aget_active_plan(self, session_id: str) -> Optional[Plan]:
         """Fetch the currently active plan for the session."""

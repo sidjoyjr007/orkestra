@@ -35,7 +35,8 @@ def test_executor_init(mock_agent, mock_event_bus):
     assert executor.event_bus == mock_event_bus
     mock_event_bus.subscribe.assert_called_once()
     
-def test_on_approval_provided(mock_agent):
+@pytest.mark.asyncio
+async def test_on_approval_provided(mock_agent):
     executor = ToolExecutor(mock_agent)
     fut = asyncio.Future()
     executor._pending_approvals["call-1"] = fut

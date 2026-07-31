@@ -120,3 +120,62 @@ class TaskCompletedEvent(Event):
     session_id: str
     tool_call_id: str
     result: str
+
+@dataclass
+class GuardrailTriggered(Event):
+    """Fired when a guardrail blocks, redacts, or feeds back content."""
+    agent_name: str
+    session_id: str
+    stage: str
+    action_taken: str
+    message: str
+    modified_content: Optional[str] = None
+
+@dataclass
+class MemoryReadEvent(Event):
+    """Fired when conversation history is fetched from memory."""
+    session_id: str
+    message_count: int
+
+@dataclass
+class MemoryWrittenEvent(Event):
+    """Fired when a message is saved to memory."""
+    session_id: str
+    role: str
+    
+@dataclass
+class WorkspaceReadEvent(Event):
+    """Fired when workspace plans/tasks are retrieved."""
+    session_id: str
+    items_retrieved: int
+    
+@dataclass
+class WorkspaceWrittenEvent(Event):
+    """Fired when workspace plans/tasks are updated or created."""
+    session_id: str
+    action: str
+    
+@dataclass
+class ToolSearchStarted(Event):
+    """Fired when ToolRegistry begins searching ChromaDB for relevant tools."""
+    agent_id: str
+    query: str
+
+@dataclass
+class ToolSearchCompleted(Event):
+    """Fired when ToolRegistry completes a search."""
+    agent_id: str
+    tools_found: int
+
+@dataclass
+class ContextCompactionStarted(Event):
+    """Fired when token summarization begins."""
+    session_id: str
+    current_tokens: int
+    max_tokens: int
+
+@dataclass
+class ContextCompactionCompleted(Event):
+    """Fired when token summarization completes."""
+    session_id: str
+    new_tokens: int

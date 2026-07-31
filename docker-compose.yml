@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  orkestra-ui:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: orkestra-ui
+    ports:
+      - "3000:80"
+    depends_on:
+      - orkestra-api
+    networks:
+      - orkestra-net
+    restart: unless-stopped
+
+  orkestra-api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: orkestra-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - orkestra-db
+    environment:
+      - DB_HOST=orkestra-db
+      - DB_PORT=5432
+      - DB_USER=orkestra
+      - DB_PASS=orkestra_secret
+      - DB_NAME=orkestra_state
+    networks:
+      - orkestra-net
+    restart: unless-stopped
+
+  orkestra-db:
+    image: postgres:15-alpine
+    container_name: orkestra-db
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_USER=orkestra
+      - POSTGRES_PASSWORD=orkestra_secret
+      - POSTGRES_DB=orkestra_state
+    volumes:
+      - orkestra_db_data:/var/lib/postgresql/data
+    networks:
+      - orkestra-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orkestra -d orkestra_state"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+networks:
+  orkestra-net:
+    driver: bridge
+
+volumes:
+  orkestra_db_data:

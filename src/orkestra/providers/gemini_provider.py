@@ -112,7 +112,10 @@ class GeminiProvider(BaseProvider):
                 ))
 
             if parts:
-                formatted.append(types.Content(role=role, parts=parts))
+                if formatted and formatted[-1].role == role:
+                    formatted[-1].parts = list(formatted[-1].parts) + parts
+                else:
+                    formatted.append(types.Content(role=role, parts=parts))
                 
         return formatted
 
@@ -123,37 +126,53 @@ class GeminiProvider(BaseProvider):
             if "type" in t and t["type"] == "function":
                 func = t["function"]
                 # Convert the JSON schema to Gemini's Schema object
+        def _to_gemini_schema(v: dict) -> types.Schema:
+            prop_type_val = v.get("type", "string")
+            if isinstance(prop_type_val, list):
+                prop_type_val = prop_type_val[0] if prop_type_val else "string"
+            prop_type_str = str(prop_type_val).lower()
+            
+            if prop_type_str == "string":
+                t = types.Type.STRING
+            elif prop_type_str in ("integer", "int"):
+                t = types.Type.INTEGER
+            elif prop_type_str in ("number", "float"):
+                t = types.Type.NUMBER
+            elif prop_type_str == "boolean":
+                t = types.Type.BOOLEAN
+            elif prop_type_str == "array":
+                t = types.Type.ARRAY
+            elif prop_type_str == "object":
+                t = types.Type.OBJECT
+            else:
+                t = types.Type.STRING
+                
+            schema_kwargs = {
+                "type": t,
+                "description": v.get("description", "")
+            }
+            
+            if t == types.Type.ARRAY:
+                items = v.get("items", {"type": "string"})
+                schema_kwargs["items"] = _to_gemini_schema(items)
+                
+            if t == types.Type.OBJECT:
+                props = v.get("properties", {})
+                if props:
+                    schema_kwargs["properties"] = {k: _to_gemini_schema(pv) for k, pv in props.items()}
+                # Gemini doesn't support required on nested schemas easily without full definition, 
+                # but we can try if it's there
+                if "required" in v:
+                    schema_kwargs["required"] = v["required"]
+                    
+            return types.Schema(**schema_kwargs)
+
+        for t in tools:
+            if "type" in t and t["type"] == "function":
+                func = t["function"]
                 properties = {}
                 for k, v in func.get("parameters", {}).get("properties", {}).items():
-                    prop_type = v.get("type", "string").lower()
-                    if prop_type == "string":
-                        t = types.Type.STRING
-                    elif prop_type in ("integer", "int"):
-                        t = types.Type.INTEGER
-                    elif prop_type in ("number", "float"):
-                        t = types.Type.NUMBER
-                    elif prop_type == "boolean":
-                        t = types.Type.BOOLEAN
-                    elif prop_type == "array":
-                        t = types.Type.ARRAY
-                    elif prop_type == "object":
-                        t = types.Type.OBJECT
-                    else:
-                        t = types.Type.STRING
-                        
-                    schema_kwargs = {
-                        "type": t,
-                        "description": v.get("description", "")
-                    }
-                    
-                    if t == types.Type.ARRAY and "items" in v:
-                        item_type = v["items"].get("type", "string").lower()
-                        if item_type == "string":
-                            schema_kwargs["items"] = types.Schema(type=types.Type.STRING)
-                        elif item_type in ("integer", "int"):
-                            schema_kwargs["items"] = types.Schema(type=types.Type.INTEGER)
-                            
-                    properties[k] = types.Schema(**schema_kwargs)
+                    properties[k] = _to_gemini_schema(v)
                 
                 schema = types.Schema(
                     type=types.Type.OBJECT,
@@ -313,9 +332,7 @@ class GeminiProvider(BaseProvider):
         gemini_tools = None
         if tools:
             gemini_tools = self._convert_tools_to_gemini(tools)
-        print("formatted_messages", formatted_messages)
-        print("system_instruction", system_instruction)
-        print("tools", gemini_tools)
+        print("system instruction :", system_instruction)
         response = await self.client.aio.models.generate_content(
             model=self.model_name,
             contents=formatted_messages,

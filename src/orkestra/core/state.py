@@ -53,6 +53,34 @@ class AgentStateSerializer:
         
         # Reconstruct agent.tools
         new_tools = []
+        
+        def _fix_schema(s: dict):
+            import copy
+            if not isinstance(s, dict): return s
+            s = copy.deepcopy(s)
+            def traverse(obj):
+                if isinstance(obj, dict):
+                    type_val = obj.get("type")
+                    is_array = (type_val == "array") or (isinstance(type_val, list) and "array" in type_val)
+                    is_object = (type_val == "object") or (isinstance(type_val, list) and "object" in type_val)
+                    
+                    if is_array:
+                        if "items" not in obj or not isinstance(obj["items"], dict):
+                            obj["items"] = {"type": "string"}
+                        elif "type" not in obj["items"] and "anyOf" not in obj["items"]:
+                            obj["items"]["type"] = "string"
+                            
+                    if is_object and "properties" not in obj:
+                        obj["properties"] = {}
+                        
+                    for k, v in obj.items():
+                        traverse(v)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        traverse(item)
+            traverse(s)
+            return s
+            
         for tool_state in state.get("tools", []):
             if tool_state.get("type") == "native":
                 # Find the matching native tool from base_tools
@@ -61,10 +89,11 @@ class AgentStateSerializer:
                     new_tools.append(matching_tool)
             elif tool_state.get("type") == "mcp":
                 # Reconstruct live MCP Tool
+                fixed_schema = _fix_schema(tool_state["schema"])
                 new_tools.append(MCPTool(
                     name=tool_state["name"],
-                    description=tool_state["schema"].get("function", {}).get("description", ""),
-                    schema=tool_state["schema"],
+                    description=fixed_schema.get("function", {}).get("description", ""),
+                    schema=fixed_schema,
                     url=tool_state["mcp_url"],
                     headers=tool_state.get("headers", {}),
                     client=httpx.AsyncClient(timeout=30.0)

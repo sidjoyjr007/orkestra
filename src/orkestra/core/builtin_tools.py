@@ -3,12 +3,15 @@ from orkestra.core.tools import HostTool
 
 def read_file_chunk_func(file_path: str, start_char: int, end_char: int, artifact_dir: str) -> str:
     """Read a specific chunk of a file. Only allowed within the session's artifact directory."""
-    allowed_dir = os.path.abspath(artifact_dir)
-    target_path = os.path.abspath(file_path)
-    
-    # Sandboxing check
-    if not target_path.startswith(allowed_dir):
-        return f"Error: Permission denied. Can only read files inside {allowed_dir}"
+    try:
+        allowed_dir = os.path.realpath(artifact_dir)
+        target_path = os.path.realpath(file_path)
+        
+        prefix = allowed_dir if allowed_dir.endswith(os.path.sep) else allowed_dir + os.path.sep
+        if not target_path.startswith(prefix) and target_path != allowed_dir:
+            return f"Error: Permission denied. Can only read files inside {allowed_dir}"
+    except Exception as e:
+        return f"Error validating paths: {str(e)}"
         
     if not os.path.exists(target_path):
         return f"Error: File not found at {target_path}. The temporary artifact may have been deleted by the OS. Please autonomously call the original tool again to re-fetch the content, and then try reading it again."
@@ -113,7 +116,7 @@ def get_search_tools_tool(agent) -> HostTool:
     
     return HostTool(
         name="search_tools",
-        description="Search the tool registry for tools that can help with a specific task.",
+        description="Search the tool registry for tools that can help with a specific task. Hint: Consider the tools listed in YOUR CAPABILITIES and search using their exact names or keywords to ensure the correct schema is retrieved from the vector DB.",
         func=search_tools_func,
         schema=schema
     )

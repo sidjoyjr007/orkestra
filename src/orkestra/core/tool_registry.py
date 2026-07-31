@@ -7,6 +7,7 @@ import chromadb
 from orkestra.core.tools import Tool
 from orkestra.mcp.http_client import MCPTool
 from orkestra.core.telemetry import get_logger
+from orkestra.events.base import ToolSearchStarted, ToolSearchCompleted
 
 logger = get_logger("orkestra.core.tool_registry")
 
@@ -15,9 +16,10 @@ class ToolRegistry:
     Connects to an external ChromaDB Vector Database to perform Semantic Tool Routing (Tool RAG).
     Assumes tools are pre-embedded by an external process.
     """
-    def __init__(self, url: str, agent_id: str, collection_name: str = "orkestra_tools"):
+    def __init__(self, url: str, agent_id: str, collection_name: str = "orkestra_tools", event_bus: Optional[Any] = None):
         self.url = url
         self.agent_id = agent_id
+        self.event_bus = event_bus
         
         parsed = urlparse(url)
         host = parsed.hostname or "localhost"
@@ -35,8 +37,13 @@ class ToolRegistry:
         Searches the vector database for tools relevant to the query.
         Filters by agent_id and applies a similarity threshold.
         """
+        if self.event_bus:
+            self.event_bus.publish(ToolSearchStarted(agent_id=self.agent_id, query=query))
+            
         if not self.collection:
             logger.error("ChromaDB collection is not initialized.")
+            if self.event_bus:
+                self.event_bus.publish(ToolSearchCompleted(agent_id=self.agent_id, tools_found=0))
             return []
             
         try:
@@ -51,6 +58,8 @@ class ToolRegistry:
             
             tools = []
             if not results['documents'] or not results['documents'][0]:
+                if self.event_bus:
+                    self.event_bus.publish(ToolSearchCompleted(agent_id=self.agent_id, tools_found=0))
                 return tools
                 
             for i in range(len(results['documents'][0])):
@@ -70,9 +79,13 @@ class ToolRegistry:
                 if tool:
                     tools.append(tool)
                     
+            if self.event_bus:
+                self.event_bus.publish(ToolSearchCompleted(agent_id=self.agent_id, tools_found=len(tools)))
             return tools
         except Exception as e:
             logger.error(f"Error querying ToolRegistry: {e}")
+            if self.event_bus:
+                self.event_bus.publish(ToolSearchCompleted(agent_id=self.agent_id, tools_found=0))
             return []
             
     def _reconstruct_tool(self, metadata: Dict[str, Any]) -> Optional[Tool]:
@@ -98,18 +111,15 @@ class ToolRegistry:
                     logger.error(f"MCP tool '{name}' is missing mcp_url in metadata.")
                     return None
                     
-                # We create a dummy client here. In a real system, the AgentRunner should 
-                # manage this client, but for dynamic RAG reconstruction we instantiate it per tool.
+                # We pass headers and url, MCPTool will dynamically create a session when executed.
                 headers = {"Accept": "text/event-stream, application/json"}
-                client = httpx.AsyncClient(timeout=30.0)
                 
                 tool = MCPTool(
                     name=name,
                     description=description,
                     schema=schema,
                     url=mcp_url,
-                    headers=headers,
-                    client=client
+                    headers=headers
                 )
                 return tool
             else:
@@ -123,7 +133,17 @@ class ToolRegistry:
                         exec(code, namespace)
                         func = namespace.get(name)
                         if not func or not callable(func):
-                            raise ValueError(f"Compiled code did not contain a callable function named '{name}'")
+                            # Try to find the function name using AST if the schema name doesn't match
+                            import ast
+                            tree = ast.parse(code)
+                            func_defs = [n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+                            if func_defs:
+                                # Usually the main function is the last one defined or the only one
+                                func = namespace.get(func_defs[-1])
+                                
+                        if not func or not callable(func):
+                            raise ValueError(f"Compiled code did not contain a callable function named '{name}' or any other identifiable function")
+                            
                         # Attach the source code so Tool.run() can extract it without inspect.getsource
                         func.__source_code__ = code
                     except Exception as code_exc:
@@ -137,11 +157,19 @@ class ToolRegistry:
                         raise NotImplementedError(f"Local tool '{name}' has no 'code' in metadata.")
                     func = dummy_func
                     
+                dependencies_str = metadata.get("dependencies", "[]")
+                try:
+                    dependencies = json.loads(dependencies_str)
+                except Exception:
+                    dependencies = []
+                network_access = bool(metadata.get("network_access", False))
+                
+                requires_approval = str(metadata.get("requires_approval", "false")).lower() == "true"
                 if tool_type == "host_tool":
                     from orkestra.core.tools import HostTool
-                    return HostTool(name=name, description=description, func=func, schema=schema)
+                    return HostTool(name=name, description=description, func=func, schema=schema, dependencies=dependencies, network_access=network_access, requires_approval=requires_approval)
                 else:
-                    return Tool(name=name, description=description, func=func, schema=schema)
+                    return Tool(name=name, description=description, func=func, schema=schema, dependencies=dependencies, network_access=network_access, requires_approval=requires_approval)
                 
         except Exception as e:
             logger.error(f"Failed to reconstruct tool from metadata: {e}")
@@ -149,8 +177,7 @@ class ToolRegistry:
 
     def inject_semantic_tools(self, agent) -> None:
         """
-        Extracts the semantic intent from the agent's recent messages and injects 
-        relevant tools dynamically into the agent's toolbelt.
+        Synchronous fallback for intent extraction (avoids workspace if async is required).
         """
         last_intent = None
         for msg in reversed(agent.messages):
@@ -158,9 +185,66 @@ class ToolRegistry:
                 last_intent = msg.content
                 break
                 
+        # Always extract historical tool names to ensure they are loaded
+        historical_tool_names = set()
+        for msg in agent.messages:
+            if msg.role == "assistant" and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    historical_tool_names.add(tc.function_name)
+                    
+        for tool_name in historical_tool_names:
+            found = self.search(tool_name, threshold=0.2)
+            existing_names = {t.name for t in agent.tools}
+            for t in found:
+                if t.name not in existing_names:
+                    agent.tools.append(t)
+                    
         if last_intent:
             logger.info("Performing Semantic Tool Routing (Tool RAG) against VectorDB...", extra={"extra_data": {"agent_id": agent.id, "intent": last_intent[:50]}})
-            found_tools = self.search(last_intent)
+            found_tools = self.search(last_intent, threshold=0.25)
+            existing_names = {t.name for t in agent.tools}
+            for t in found_tools:
+                if t.name not in existing_names:
+                    agent.tools.append(t)
+                    logger.info(f"Dynamically injected tool: {t.name}", extra={"extra_data": {"agent_id": agent.id, "tool_name": t.name}})
+
+    async def ainject_semantic_tools(self, agent) -> None:
+        """
+        Extracts the semantic intent from the active plan (if any) or recent messages
+        and injects relevant tools dynamically into the agent's toolbelt.
+        """
+        intent_query = None
+        
+        # 1. First, try to extract intent from an active plan
+        if getattr(agent, "workspace", None):
+            active_plan = await agent.workspace.aget_active_plan(agent.session_id)
+            if active_plan:
+                task_descriptions = [t.description for t in active_plan.tasks]
+                intent_query = " ".join(task_descriptions) if task_descriptions else ""
+        # 2. Fallback to last user message or assistant intent if no active plan
+        if not intent_query:
+            for msg in reversed(agent.messages):
+                if msg.role == "user" or (msg.role == "assistant" and msg.content and "Plan:" in msg.content):
+                    intent_query = msg.content
+                    break
+                    
+        # 3. Always extract historical tool names to ensure they are loaded
+        historical_tool_names = set()
+        for msg in agent.messages:
+            if msg.role == "assistant" and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    historical_tool_names.add(tc.function_name)
+                    
+        for tool_name in historical_tool_names:
+            found = self.search(tool_name, threshold=0.2)
+            existing_names = {t.name for t in agent.tools}
+            for t in found:
+                if t.name not in existing_names:
+                    agent.tools.append(t)
+                    
+        if intent_query:
+            logger.info("Performing Semantic Tool Routing (Tool RAG) against VectorDB...", extra={"extra_data": {"agent_id": agent.id, "intent": intent_query[:50]}})
+            found_tools = self.search(intent_query, threshold=0.25)
             existing_names = {t.name for t in agent.tools}
             for t in found_tools:
                 if t.name not in existing_names:

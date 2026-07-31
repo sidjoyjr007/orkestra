@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Any
 import asyncio
 
 from sqlalchemy import Column, Integer, String, Text, DateTime, JSON
@@ -11,6 +11,7 @@ from sqlalchemy.future import select
 
 from orkestra.core.messages import Message, ToolCall
 from orkestra.memory.base import BaseMemory
+from orkestra.events.base import MemoryReadEvent, MemoryWrittenEvent
 
 Base = declarative_base()
 
@@ -38,11 +39,15 @@ class PostgresMemoryStore(BaseMemory):
     Persistent memory store using PostgreSQL via SQLAlchemy.
     Supports both synchronous and asynchronous operations.
     """
-    def __init__(self, db_url: str):
+    def __init__(self, db_url: str, event_bus: Optional[Any] = None):
+        super().__init__(event_bus)
         # Convert base postgresql:// URL to specific drivers if needed
         if db_url.startswith("postgresql://"):
             sync_url = db_url.replace("postgresql://", "postgresql+psycopg2://")
             async_url = db_url.replace("postgresql://", "postgresql+asyncpg://")
+        elif db_url.startswith("postgresql+asyncpg://"):
+            sync_url = db_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+            async_url = db_url
         elif db_url.startswith("sqlite://"):
             sync_url = db_url
             async_url = db_url.replace("sqlite://", "sqlite+aiosqlite://")
@@ -61,40 +66,41 @@ class PostgresMemoryStore(BaseMemory):
         # Automatically create schema
         Base.metadata.create_all(bind=self.engine)
 
-    def _message_to_model(self, session_id: str, message: Message) -> MessageModel:
-        tool_calls_data = None
-        if message.tool_calls:
-            tool_calls_data = [
+    def _model_to_message(self, model: MessageModel) -> Message:
+        tool_calls = None
+        if model.tool_calls:
+            tool_calls = []
+            for tc_dict in model.tool_calls:
+                tc = ToolCall(
+                    id=tc_dict.get("id"),
+                    type=tc_dict.get("type", "function"),
+                    function_name=tc_dict.get("function_name") or tc_dict.get("function", {}).get("name"),
+                    function_arguments=tc_dict.get("function_arguments") or tc_dict.get("function", {}).get("arguments")
+                )
+                tool_calls.append(tc)
+
+        return Message(
+            role=model.role,
+            content=model.content,
+            name=model.name,
+            tool_calls=tool_calls,
+            tool_call_id=model.tool_call_id
+        )
+
+    def _message_to_model(self, session_id: str, model: Message) -> MessageModel:
+        tool_calls = None
+        if model.tool_calls:
+            tool_calls = [
                 {
                     "id": tc.id,
+                    "type": tc.type,
                     "function_name": tc.function_name,
                     "function_arguments": tc.function_arguments
-                }
-                for tc in message.tool_calls
+                } for tc in model.tool_calls
             ]
             
         return MessageModel(
             session_id=session_id,
-            role=message.role,
-            content=message.content,
-            name=message.name,
-            tool_calls=tool_calls_data,
-            tool_call_id=message.tool_call_id
-        )
-
-    def _model_to_message(self, model: MessageModel) -> Message:
-        tool_calls = None
-        if model.tool_calls:
-            tool_calls = [
-                ToolCall(
-                    id=tc["id"],
-                    function_name=tc["function_name"],
-                    function_arguments=tc["function_arguments"]
-                )
-                for tc in model.tool_calls
-            ]
-            
-        return Message(
             role=model.role,
             content=model.content,
             name=model.name,
@@ -107,11 +113,16 @@ class PostgresMemoryStore(BaseMemory):
             model = self._message_to_model(session_id, message)
             session.add(model)
             session.commit()
+            if self.event_bus:
+                self.event_bus.publish(MemoryWrittenEvent(session_id=session_id, role=message.role))
 
     def get_messages(self, session_id: str) -> List[Message]:
         with self.SessionLocal() as session:
             models = session.query(MessageModel).filter(MessageModel.session_id == session_id).order_by(MessageModel.id).all()
-            return [self._model_to_message(m) for m in models]
+            messages = [self._model_to_message(m) for m in models]
+            if self.event_bus:
+                self.event_bus.publish(MemoryReadEvent(session_id=session_id, message_count=len(messages)))
+            return messages
 
     def clear(self, session_id: str) -> None:
         with self.SessionLocal() as session:
@@ -123,13 +134,18 @@ class PostgresMemoryStore(BaseMemory):
             model = self._message_to_model(session_id, message)
             session.add(model)
             await session.commit()
+            if self.event_bus:
+                self.event_bus.publish(MemoryWrittenEvent(session_id=session_id, role=message.role))
 
     async def aget_messages(self, session_id: str) -> List[Message]:
         async with self.AsyncSessionLocal() as session:
             stmt = select(MessageModel).where(MessageModel.session_id == session_id).order_by(MessageModel.id)
             result = await session.execute(stmt)
             models = result.scalars().all()
-            return [self._model_to_message(m) for m in models]
+            messages = [self._model_to_message(m) for m in models]
+            if self.event_bus:
+                self.event_bus.publish(MemoryReadEvent(session_id=session_id, message_count=len(messages)))
+            return messages
 
     async def aclear(self, session_id: str) -> None:
         async with self.AsyncSessionLocal() as session:

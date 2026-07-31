@@ -5,7 +5,7 @@ from typing import List, Dict, Optional, Any
 from orkestra.core.messages import Message, ToolCall
 from orkestra.core.exceptions import WorkflowPausedError
 from orkestra.events.bus import EventBus
-from orkestra.events.base import ToolExecutionStarted, ToolExecutionCompleted, HumanApprovalRequested, HumanApprovalProvided, WorkflowPaused
+from orkestra.events.base import ToolExecutionStarted, ToolExecutionCompleted, HumanApprovalRequested, HumanApprovalProvided, WorkflowPaused, GuardrailTriggered
 from orkestra.guardrails.base import GuardrailStage, GuardrailAction
 from orkestra.core.prompts import TOOL_LOOP_WARNING
 from orkestra.core.telemetry import get_logger
@@ -80,6 +80,14 @@ class ToolExecutor:
                     if res.action == GuardrailAction.BLOCK:
                         result = f"Error: Tool execution blocked by guardrail: {res.message}"
                         if self.event_bus:
+                            self.event_bus.publish(GuardrailTriggered(
+                                agent_name=self.agent.name,
+                                session_id=self.agent.session_id,
+                                stage=GuardrailStage.ACTION.value,
+                                action_taken=GuardrailAction.BLOCK.value,
+                                message=res.message,
+                                modified_content=res.modified_content
+                            ))
                             self.event_bus.publish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=result))
                         self.agent.add_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
                         blocked_by_guardrail = True
@@ -87,11 +95,28 @@ class ToolExecutor:
                     elif res.action == GuardrailAction.FEEDBACK:
                         result = f"SYSTEM WARNING: Guardrail failed for tool '{tool_name}': {res.message}. Please reconsider your action."
                         if self.event_bus:
+                            self.event_bus.publish(GuardrailTriggered(
+                                agent_name=self.agent.name,
+                                session_id=self.agent.session_id,
+                                stage=GuardrailStage.ACTION.value,
+                                action_taken=GuardrailAction.FEEDBACK.value,
+                                message=res.message,
+                                modified_content=res.modified_content
+                            ))
                             self.event_bus.publish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=result))
                         self.agent.add_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
                         blocked_by_guardrail = True
                         break
                     elif res.action == GuardrailAction.REDACT:
+                        if self.event_bus:
+                            self.event_bus.publish(GuardrailTriggered(
+                                agent_name=self.agent.name,
+                                session_id=self.agent.session_id,
+                                stage=GuardrailStage.ACTION.value,
+                                action_taken=GuardrailAction.REDACT.value,
+                                message=res.message,
+                                modified_content=res.modified_content
+                            ))
                         tool_args_str = res.modified_content
                         kwargs_args = json.loads(tool_args_str) if tool_args_str else {}
                         
@@ -100,11 +125,26 @@ class ToolExecutor:
                 
             if tool:
                 if getattr(tool, 'requires_approval', False):
-                    if self.event_bus:
-                        self.event_bus.publish(HumanApprovalRequested(agent_name=self.agent.name, tool_name=tool_name, tool_call_id=tool_call.id, tool_args=kwargs_args))
-                        self.event_bus.publish(WorkflowPaused(agent_name=self.agent.name))
-                    logger.info(f"Execution paused. Tool '{tool_name}' requires human approval.", extra={"extra_data": {"agent_id": self.agent.id, "tool_name": tool_name}})
-                    raise WorkflowPausedError(f"Workflow paused: Tool '{tool_name}' requires human approval.")
+                    # Check if already approved via HITL injection (must come after the requesting assistant message)
+                    last_assistant_idx = None
+                    for idx, msg in enumerate(reversed(self.agent.messages)):
+                        if msg.role == "assistant":
+                            last_assistant_idx = len(self.agent.messages) - 1 - idx
+                            break
+                            
+                    is_approved = False
+                    if last_assistant_idx is not None:
+                        is_approved = any(
+                            msg.role == "system" and msg.content and f"[HITL_APPROVED] {tool_call.id}" in msg.content
+                            for msg in self.agent.messages[last_assistant_idx + 1:]
+                        )
+                    
+                    if not is_approved:
+                        if self.event_bus:
+                            self.event_bus.publish(HumanApprovalRequested(agent_name=self.agent.name, tool_name=tool_name, tool_call_id=tool_call.id, tool_args=kwargs_args))
+                            self.event_bus.publish(WorkflowPaused(agent_name=self.agent.name))
+                        logger.info(f"Execution paused. Tool '{tool_name}' requires human approval.", extra={"extra_data": {"agent_id": self.agent.id, "tool_name": tool_name}})
+                        raise WorkflowPausedError(f"Workflow paused: Tool '{tool_name}' requires human approval.", tool_name=tool_name, tool_call_id=tool_call.id, tool_args=kwargs_args)
                     
                 try:
                     logger.info(f"Executing tool '{tool_name}'", extra={"extra_data": {"agent_id": self.agent.id, "tool_name": tool_name}})
@@ -188,26 +228,29 @@ class ToolExecutor:
                 error = result
             else:
                 if getattr(tool, 'requires_approval', False):
-                    if self.event_bus:
-                        await self.event_bus.apublish(HumanApprovalRequested(agent_name=self.agent.name, tool_name=tool_name, tool_call_id=tool_call.id, tool_args=kwargs_args))
-                        await self.event_bus.apublish(WorkflowPaused(agent_name=self.agent.name))
-                        
-                    loop = asyncio.get_running_loop()
-                    fut = loop.create_future()
-                    self._pending_approvals[tool_call.id] = fut
+                    # Check if already approved via HITL injection (must come after the requesting assistant message)
+                    last_assistant_idx = None
+                    for idx, msg in enumerate(reversed(self.agent.messages)):
+                        if msg.role == "assistant":
+                            last_assistant_idx = len(self.agent.messages) - 1 - idx
+                            break
+                            
+                    is_approved = False
+                    if last_assistant_idx is not None:
+                        is_approved = any(
+                            msg.role == "system" and msg.content and f"[HITL_APPROVED] {tool_call.id}" in msg.content
+                            for msg in self.agent.messages[last_assistant_idx + 1:]
+                        )
                     
-                    decision_result = await fut
-                    del self._pending_approvals[tool_call.id]
-                    
-                    if "[HUMAN REJECTED]" in decision_result.upper():
-                        result = decision_result
-                        error = None
+                    if not is_approved:
                         if self.event_bus:
-                            await self.event_bus.apublish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=error))
-                        await self.agent.aadd_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
-                        continue
-                    else:
-                        pass
+                            await self.event_bus.apublish(HumanApprovalRequested(agent_name=self.agent.name, tool_name=tool_name, tool_call_id=tool_call.id, tool_args=kwargs_args))
+                            await self.event_bus.apublish(WorkflowPaused(agent_name=self.agent.name))
+                            
+                        # In async context (currently unused by /chat/stream but kept for backward compatibility),
+                        # we wait for an in-memory event. 
+                        # However, for API-based workflows, we should just raise WorkflowPausedError so it bubbles up.
+                        raise WorkflowPausedError(f"Workflow paused: Tool '{tool_name}' requires human approval.", tool_name=tool_name, tool_call_id=tool_call.id, tool_args=kwargs_args)
                     
                 try:
                     logger.info(f"Executing tool '{tool_name}'", extra={"extra_data": {"agent_id": self.agent.id, "tool_name": tool_name}})
@@ -230,12 +273,17 @@ class ToolExecutor:
                     error = result
                     
             if tool and getattr(tool, 'max_result_length', None) is not None and len(result) > tool.max_result_length:
-                import aiofiles
+                import uuid
                 artifact_dir = f"/tmp/orkestra_artifacts/{self.agent.session_id}"
                 os.makedirs(artifact_dir, exist_ok=True)
-                artifact_path = os.path.join(artifact_dir, f"{tool_call.id}.txt")
-                async with aiofiles.open(artifact_path, "w") as f:
-                    await f.write(result)
+                artifact_path = os.path.join(artifact_dir, f"{tool_call.id}_{uuid.uuid4().hex[:8]}.txt")
+                
+                # Write to disk without blocking the event loop or requiring aiofiles
+                def write_artifact():
+                    with open(artifact_path, "w") as f:
+                        f.write(result)
+                await asyncio.to_thread(write_artifact)
+                
                 result = result[:tool.max_result_length] + f"\n... [TRUNCATED] The output exceeded the maximum length. The full raw output was automatically saved to: {artifact_path}."
                     
             if self.event_bus:

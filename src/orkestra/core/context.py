@@ -1,8 +1,9 @@
 import abc
-from typing import List, Any
+from typing import List, Any, Optional
 import json
 from orkestra.core.messages import Message
 from orkestra.core.prompts import SUMMARIZATION_PROMPT
+from orkestra.events.base import ContextCompactionStarted, ContextCompactionCompleted
 
 class CompactionStrategy(abc.ABC):
     @abc.abstractmethod
@@ -29,9 +30,10 @@ class SlidingWindowStrategy(CompactionStrategy):
         return [Message(role="system", content=system_prompt)] + non_system
 
 class TokenSummarizationStrategy(CompactionStrategy):
-    def __init__(self, max_tokens: int, provider: Any):
+    def __init__(self, max_tokens: int, provider: Any, event_bus: Optional[Any] = None):
         self.max_tokens = max_tokens
         self.provider = provider
+        self.event_bus = event_bus
         
     def _estimate_tokens(self, text: str) -> int:
         return len(text) // 4
@@ -51,6 +53,9 @@ class TokenSummarizationStrategy(CompactionStrategy):
         current_tokens = self._count_message_tokens(non_system)
         if current_tokens <= self.max_tokens or len(non_system) < 4:
             return [Message(role="system", content=system_prompt)] + non_system
+            
+        if self.event_bus:
+            self.event_bus.publish(ContextCompactionStarted(session_id=session_id, current_tokens=current_tokens, max_tokens=self.max_tokens))
             
         # We need to summarize. Let's keep the last 2 messages (e.g., user prompt and current state)
         keep_recent = 2
@@ -82,4 +87,10 @@ class TokenSummarizationStrategy(CompactionStrategy):
             for m in recent:
                 await memory.aadd_message(session_id, m)
                 
-        return [Message(role="system", content=system_prompt), summary_msg] + recent
+        final_messages = [Message(role="system", content=system_prompt), summary_msg] + recent
+        
+        if self.event_bus:
+            new_tokens = self._count_message_tokens([summary_msg] + recent)
+            self.event_bus.publish(ContextCompactionCompleted(session_id=session_id, new_tokens=new_tokens))
+            
+        return final_messages
