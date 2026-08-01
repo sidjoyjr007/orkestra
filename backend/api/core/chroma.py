@@ -8,19 +8,19 @@ logger = logging.getLogger(__name__)
 
 # We use the ChromaDB HttpClient to match the runner's approach
 # and assume ChromaDB is running as a container (e.g. host.docker.internal or localhost)
-CHROMA_URL = os.environ.get("CHROMA_URL", "http://localhost:8000")
+TOOL_REGISTRY_URL = os.environ.get("TOOL_REGISTRY_URL", "http://localhost:8100")
 
 def get_chroma_collection(collection_name: str = "orkestra_tools"):
     from urllib.parse import urlparse
-    parsed = urlparse(CHROMA_URL)
+    parsed = urlparse(TOOL_REGISTRY_URL)
     host = parsed.hostname or "localhost"
-    port = parsed.port or 8000
+    port = parsed.port or 8100
     
     try:
         client = chromadb.HttpClient(host=host, port=port)
         return client.get_or_create_collection(name=collection_name)
     except Exception as e:
-        logger.warning(f"Failed to connect to ChromaDB at {CHROMA_URL}: {e}")
+        logger.warning(f"Failed to connect to ChromaDB at {TOOL_REGISTRY_URL}: {e}")
         return None
 
 def embed_tool_in_vector_db(agent_id: str, tool_id: str, name: str, description: str, schema_dict: dict, tool_type: str, mcp_url: str = None, code: str = None):

@@ -325,7 +325,7 @@ async def lifespan(app: FastAPI):
         from urllib.parse import urlparse
         parsed = urlparse(TOOL_REGISTRY_URL)
         try:
-            chroma_client = chromadb.HttpClient(host=parsed.hostname or "localhost", port=parsed.port or 8000)
+            chroma_client = chromadb.HttpClient(host=parsed.hostname or "localhost", port=parsed.port or 8100)
             collection = chroma_client.get_or_create_collection("orkestra_tools")
             collection.delete(where={"agent_id": AGENT_ID})
             
