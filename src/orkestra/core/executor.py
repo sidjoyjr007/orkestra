@@ -52,7 +52,7 @@ class ToolExecutor:
             if historical_count >= 3:
                 result = TOOL_LOOP_WARNING.format(tool_name=tool_name, historical_count=historical_count)
                 if self.event_bus:
-                    self.event_bus.publish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=result))
+                    self.event_bus.publish(ToolExecutionCompleted(agent_name=self.agent.name, session_id=self.agent.session_id, tool_name=tool_name, tool_call_id=tool_call.id, result=result, error=result))
                 self.agent.add_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
                 continue
             
@@ -88,7 +88,7 @@ class ToolExecutor:
                                 message=res.message,
                                 modified_content=res.modified_content
                             ))
-                            self.event_bus.publish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=result))
+                            self.event_bus.publish(ToolExecutionCompleted(agent_name=self.agent.name, session_id=self.agent.session_id, tool_name=tool_name, tool_call_id=tool_call.id, result=result, error=result))
                         self.agent.add_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
                         blocked_by_guardrail = True
                         break
@@ -103,7 +103,7 @@ class ToolExecutor:
                                 message=res.message,
                                 modified_content=res.modified_content
                             ))
-                            self.event_bus.publish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=result))
+                            self.event_bus.publish(ToolExecutionCompleted(agent_name=self.agent.name, session_id=self.agent.session_id, tool_name=tool_name, tool_call_id=tool_call.id, result=result, error=result))
                         self.agent.add_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
                         blocked_by_guardrail = True
                         break
@@ -155,7 +155,7 @@ class ToolExecutor:
                     kwargs_args["_agent_name"] = self.agent.name
                     
                     if self.event_bus:
-                        self.event_bus.publish(ToolExecutionStarted(agent_name=self.agent.name, tool_name=tool_name, tool_args=kwargs_args))
+                        self.event_bus.publish(ToolExecutionStarted(agent_name=self.agent.name, session_id=self.agent.session_id, tool_name=tool_name, tool_call_id=tool_call.id, tool_args=kwargs_args))
                     result = tool.run(**kwargs_args)
                     error = None
                 except WorkflowPausedError as e:
@@ -174,7 +174,7 @@ class ToolExecutor:
                 result = result[:tool.max_result_length] + f"\n... [TRUNCATED] The output exceeded the maximum length. The full raw output was automatically saved to: {artifact_path}."
                     
             if self.event_bus:
-                self.event_bus.publish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=error))
+                self.event_bus.publish(ToolExecutionCompleted(agent_name=self.agent.name, session_id=self.agent.session_id, tool_name=tool_name, tool_call_id=tool_call.id, result=result, error=error))
             
             self.agent.add_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
 
@@ -195,14 +195,14 @@ class ToolExecutor:
                     if res.action == GuardrailAction.BLOCK:
                         result = f"Error: Tool execution blocked by guardrail: {res.message}"
                         if self.event_bus:
-                            await self.event_bus.apublish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=result))
+                            await self.event_bus.apublish(ToolExecutionCompleted(agent_name=self.agent.name, session_id=self.agent.session_id, tool_name=tool_name, tool_call_id=tool_call.id, result=result, error=result))
                         await self.agent.aadd_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
                         blocked_by_guardrail = True
                         break
                     elif res.action == GuardrailAction.FEEDBACK:
                         result = f"SYSTEM WARNING: Guardrail failed for tool '{tool_name}': {res.message}. Please reconsider your action."
                         if self.event_bus:
-                            await self.event_bus.apublish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=result))
+                            await self.event_bus.apublish(ToolExecutionCompleted(agent_name=self.agent.name, session_id=self.agent.session_id, tool_name=tool_name, tool_call_id=tool_call.id, result=result, error=result))
                         await self.agent.aadd_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
                         blocked_by_guardrail = True
                         break
@@ -218,7 +218,7 @@ class ToolExecutor:
             if historical_count >= 3:
                 result = TOOL_LOOP_WARNING.format(tool_name=tool_name, historical_count=historical_count)
                 if self.event_bus:
-                    await self.event_bus.apublish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=result))
+                    await self.event_bus.apublish(ToolExecutionCompleted(agent_name=self.agent.name, session_id=self.agent.session_id, tool_name=tool_name, tool_call_id=tool_call.id, result=result, error=result))
                 await self.agent.aadd_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))
                 continue
             
@@ -261,7 +261,7 @@ class ToolExecutor:
                     kwargs_args["_agent_name"] = self.agent.name
                     
                     if self.event_bus:
-                        await self.event_bus.apublish(ToolExecutionStarted(agent_name=self.agent.name, tool_name=tool_name, tool_args=kwargs_args))
+                        await self.event_bus.apublish(ToolExecutionStarted(agent_name=self.agent.name, session_id=self.agent.session_id, tool_name=tool_name, tool_call_id=tool_call.id, tool_args=kwargs_args))
                     result = await tool.arun(**kwargs_args)
                     error = None
                 except WorkflowPausedError as e:
@@ -287,6 +287,6 @@ class ToolExecutor:
                 result = result[:tool.max_result_length] + f"\n... [TRUNCATED] The output exceeded the maximum length. The full raw output was automatically saved to: {artifact_path}."
                     
             if self.event_bus:
-                await self.event_bus.apublish(ToolExecutionCompleted(agent_name=self.agent.name, tool_name=tool_name, result=result, error=error))
+                await self.event_bus.apublish(ToolExecutionCompleted(agent_name=self.agent.name, session_id=self.agent.session_id, tool_name=tool_name, tool_call_id=tool_call.id, result=result, error=error))
             
             await self.agent.aadd_message(Message(role="tool", name=tool_name, content=result, tool_call_id=tool_call.id))

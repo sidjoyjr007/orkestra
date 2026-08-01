@@ -21,6 +21,9 @@ class ChatRequest(BaseModel):
     session_id: str
     webhook_url: Optional[str] = None
 
+from backend.api.models.chat import MessageModel
+from sqlalchemy.future import select
+
 def get_deployment_service(db: AsyncSession = Depends(get_db)) -> DeploymentService:
     return DeploymentService(db, docker_provider, CONTROL_PLANE_URL)
 
@@ -97,3 +100,28 @@ async def get_internal_config(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+@router.get("/{agent_id}/sessions/{session_id}/messages")
+async def get_session_messages(
+    agent_id: str,
+    session_id: str,
+    user: dict = Depends(get_current_user_token),
+    db: AsyncSession = Depends(get_db)
+):
+    # Fetch messages for this session
+    query = select(MessageModel).where(MessageModel.session_id == session_id).order_by(MessageModel.id.asc())
+    result = await db.execute(query)
+    models = result.scalars().all()
+    
+    # We want to format these similarly to how they stream, or just dump them
+    return [
+        {
+            "id": m.id,
+            "role": m.role,
+            "content": m.content,
+            "name": m.name,
+            "tool_calls": m.tool_calls,
+            "tool_call_id": m.tool_call_id,
+            "created_at": m.created_at.isoformat() if m.created_at else None
+        } for m in models
+    ]

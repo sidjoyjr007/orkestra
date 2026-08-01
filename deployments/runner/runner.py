@@ -467,8 +467,9 @@ async def chat_stream(req: ChatRequest):
     
     def on_event(event):
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(queue.put(event))
+            if getattr(event, "session_id", None) == req.session_id:
+                loop = asyncio.get_running_loop()
+                loop.create_task(queue.put(event))
         except RuntimeError:
             pass
             

@@ -36,14 +36,18 @@ class TokenUsageReported(Event):
 class ToolExecutionStarted(Event):
     """Emitted when a tool begins execution."""
     agent_name: str
+    session_id: str
     tool_name: str
+    tool_call_id: str
     tool_args: Dict[str, Any]
 
 @dataclass
 class ToolExecutionCompleted(Event):
     """Emitted when a tool completes execution."""
     agent_name: str
+    session_id: str
     tool_name: str
+    tool_call_id: str
     result: str
     error: Optional[str] = None
 

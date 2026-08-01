@@ -159,7 +159,7 @@ class Agent:
             guardrails=cloned_guardrails,
             id=self.id, # Keep same ID to indicate it's the same logical agent profile
             tool_registry_url=self.tool_registry_url,
-            artifact_dir=self.artifact_dir
+            artifact_dir=self.artifact_dir if session_id is None or session_id == self.session_id else None
         )
 
     def add_message(self, message: Message):

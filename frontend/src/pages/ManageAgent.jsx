@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react"
 import { useParams, useNavigate } from "react-router-dom"
-import { Play, SquareTerminal, Loader2, Send, Bot, User, Activity, Clock, Cpu, BarChart3, Square, Terminal, RefreshCw, ShieldCheck, ArrowLeft } from "lucide-react"
+import { Play, SquareTerminal, Loader2, Send, Bot, User, Activity, Clock, Cpu, BarChart3, Square, Terminal, RefreshCw, ShieldCheck, ArrowLeft, Plus, MessageSquare } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -9,6 +9,7 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { API_BASE_URL } from "@/config"
 import { usePermissions } from "@/hooks/usePermissions"
+import { EventLogItem } from "@/components/EventLogItem"
 
 export function ManageAgent({ agents = [], onBack }) {
   const { id } = useParams()
@@ -21,7 +22,8 @@ export function ManageAgent({ agents = [], onBack }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState("")
   const [isSending, setIsSending] = useState(false)
-  const [sessionId] = useState(() => `session-${Date.now()}`)
+  const [sessionId, setSessionId] = useState(() => `session-${Date.now()}`)
+  const [isFetchingHistory, setIsFetchingHistory] = useState(false)
   const chatContainerRef = useRef(null)
   
   // Telemetry state
@@ -46,15 +48,15 @@ export function ManageAgent({ agents = [], onBack }) {
     }
   }
 
-  const fetchTelemetry = async () => {
+  const fetchTelemetry = async (skipEvents = false) => {
     try {
       const res = await fetch(`${API_BASE_URL}/api/telemetry/runs?agent_id=${id}`, { credentials: "include" })
       if (res.ok) {
         const data = await res.json()
         setRuns(data.items || [])
         
-        // Fetch events for the most recent run
-        if (data.items && data.items.length > 0) {
+        // Fetch events for the most recent run only if not skipping
+        if (!skipEvents && data.items && data.items.length > 0) {
           const latestRun = data.items[0]
           const evRes = await fetch(`${API_BASE_URL}/api/telemetry/runs/${latestRun.id}/events`, { credentials: "include" })
           if (evRes.ok) {
@@ -98,6 +100,47 @@ export function ManageAgent({ agents = [], onBack }) {
     fetchTelemetry()
     fetchActivePlan()
   }
+
+  const handleNewChat = () => {
+    setSessionId(`session-${Date.now()}`);
+    setMessages([]);
+    setEvents([]);
+    setActivePlan(null);
+  };
+
+  const handleSelectSession = async (sid) => {
+    if (sid === sessionId) return;
+    setSessionId(sid);
+    setMessages([]);
+    setEvents([]);
+    setActivePlan(null);
+    setIsFetchingHistory(true);
+    
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/deployments/${id}/sessions/${sid}/messages`, { credentials: "include" })
+      if (res.ok) {
+        const msgs = await res.json();
+        const formattedMsgs = msgs.map(m => {
+          let content = m.content || "";
+          if (m.tool_calls && m.tool_calls.length > 0) {
+            m.tool_calls.forEach(tc => {
+              const toolName = tc.function?.name || tc.function_name;
+              if (toolName) content += `\n⏳ *[Executing ${toolName}...]*`;
+            });
+          }
+          return { role: m.role, content: content };
+        }).filter(m => m.content && m.content.trim() !== "");
+        setMessages(formattedMsgs);
+      }
+      
+      // Fetch telemetry for this session specifically to get events if we wanted
+      // We will skip live events for past sessions for simplicity, they will just see the history.
+    } catch (e) {
+      console.error("Failed to fetch history", e);
+    } finally {
+      setIsFetchingHistory(false);
+    }
+  };
 
   const handleDeploy = async () => {
     setStatus("BUILDING")
@@ -188,6 +231,12 @@ export function ManageAgent({ agents = [], onBack }) {
               const dataStr = line.substring(6)
               try {
                 const eventData = JSON.parse(dataStr)
+                const eventWithTimestamp = {
+                  ...eventData,
+                  timestamp: eventData.timestamp || new Date().toISOString()
+                }
+                setEvents(prev => [...prev, eventWithTimestamp])
+                
                 if (eventData.event_type === "FinalResponse") {
                   setMessages(prev => {
                     const newMessages = [...prev]
@@ -243,8 +292,7 @@ export function ManageAgent({ agents = [], onBack }) {
       setMessages(prev => [...prev, { role: "system", content: "Network error communicating with agent." }])
     } finally {
       setIsSending(false)
-      setIsSending(false)
-      fetchTelemetry() // trigger instant telemetry refresh
+      fetchTelemetry(true) // trigger instant telemetry refresh but skip events to not overwrite live state
     }
   }
 
@@ -293,6 +341,8 @@ export function ManageAgent({ agents = [], onBack }) {
   const activeExecutions = runs.filter(r => r.status === "IN_PROGRESS").length
   const totalRuns = runs.length
   const tokensConsumed = runs.reduce((acc, r) => acc + (r.total_tokens || 0), 0)
+  
+  const uniqueSessions = [...new Map(runs.map(r => [r.session_id, r])).values()];
 
   return (
     <div className="flex flex-col text-left space-y-6 pb-12">
@@ -330,15 +380,48 @@ export function ManageAgent({ agents = [], onBack }) {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1">
         
         {/* Chat Console */}
-        <div className="lg:col-span-2 flex flex-col border rounded-xl overflow-hidden bg-background shadow-sm relative shrink-0" style={{ height: "600px" }}>
-          {/* Internal Pane Header */}
-          <div className="px-4 py-3 border-b bg-muted/20 flex items-center justify-between z-20 relative">
-            <span className="text-sm font-semibold text-muted-foreground flex items-center gap-2">
-              <SquareTerminal className="h-4 w-4" /> Interactive Console
-            </span>
+        <div className="lg:col-span-2 flex border rounded-xl overflow-hidden bg-background shadow-sm relative shrink-0" style={{ height: "600px" }}>
+          
+          {/* Session Sidebar */}
+          <div className="w-56 md:w-64 border-r flex flex-col bg-muted/10 shrink-0">
+            <div className="p-3 border-b flex items-center justify-between bg-muted/20 z-20">
+              <span className="font-semibold text-sm flex items-center gap-2">
+                <MessageSquare className="h-4 w-4" /> Chats
+              </span>
+              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={handleNewChat} title="New Chat">
+                 <Plus className="h-4 w-4" />
+              </Button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2 space-y-1">
+              {uniqueSessions.map((r, i) => (
+                <button
+                  key={i}
+                  onClick={() => handleSelectSession(r.session_id)}
+                  className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors truncate flex items-center gap-2 ${
+                    r.session_id === sessionId ? "bg-primary/10 text-primary font-medium" : "hover:bg-muted text-muted-foreground"
+                  }`}
+                >
+                  <MessageSquare className="h-3.5 w-3.5 shrink-0 opacity-70" />
+                  <span className="truncate">{new Date(r.start_time).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                </button>
+              ))}
+              {uniqueSessions.length === 0 && (
+                <div className="px-3 py-4 text-xs text-muted-foreground text-center opacity-60">
+                  No past sessions
+                </div>
+              )}
+            </div>
           </div>
 
-          <div className="flex-1 relative flex flex-col overflow-hidden">
+          {/* Main Chat Area */}
+          <div className="flex-1 flex flex-col min-w-0 relative">
+            <div className="px-4 py-3 border-b bg-muted/20 flex items-center justify-between z-20 relative">
+              <span className="text-sm font-semibold text-muted-foreground flex items-center gap-2">
+                <SquareTerminal className="h-4 w-4" /> Interactive Console
+              </span>
+            </div>
+
+            <div className="flex-1 relative flex flex-col overflow-hidden">
             {status !== "RUNNING" && (
               <div className="absolute inset-0 z-10 bg-background/95 backdrop-blur-sm flex items-center justify-center">
               <div className="text-center space-y-3">
@@ -367,7 +450,11 @@ export function ManageAgent({ agents = [], onBack }) {
           )}
           
           <div className="flex-1 overflow-y-auto p-6 space-y-6" ref={chatContainerRef}>
-            {messages.length === 0 && status === "RUNNING" && (
+            {isFetchingHistory ? (
+              <div className="h-full flex items-center justify-center">
+                <Loader2 className="h-6 w-6 text-primary animate-spin" />
+              </div>
+            ) : messages.length === 0 && status === "RUNNING" && (
               <div className="h-full flex items-center justify-center text-muted-foreground">
                 <div className="text-center">
                   <Bot className="h-8 w-8 mx-auto opacity-20 mb-3" />
@@ -376,7 +463,7 @@ export function ManageAgent({ agents = [], onBack }) {
                 </div>
               </div>
             )}
-            {messages.map((m, i) => {
+            {!isFetchingHistory && messages.map((m, i) => {
               const renderMessageContent = (content, isToolActive) => {
                 if (!content) return null;
                 const toolRegex = /⏳ \*\[Executing (.*?)\.\.\.\]\*/g;
@@ -516,6 +603,7 @@ export function ManageAgent({ agents = [], onBack }) {
                 </Button>
               </div>
             </div>
+            </div>
           </div>
         </div>
         </div>
@@ -613,26 +701,28 @@ export function ManageAgent({ agents = [], onBack }) {
         </div>
         <CardContent className="p-0 flex-1 overflow-y-auto">
           <div className="w-full">
-            <div className="p-4 font-mono text-[12px] leading-relaxed space-y-3">
+            <div className="p-4 space-y-1">
               {events.length === 0 ? (
-                <span className="opacity-50 flex items-center gap-2 text-muted-foreground">
+                <span className="opacity-50 flex items-center gap-2 text-muted-foreground font-mono text-[12px]">
                   No events to display. Refresh to check.
                 </span>
-              ) : (
-                [...events].reverse().map((e, idx) => (
-                  <div key={idx} className="border-l-[2px] border-primary/20 pl-3 py-0.5">
-                    <div className="flex gap-3 items-center">
-                      <span className="text-muted-foreground text-[10px]">[{new Date(e.timestamp).toLocaleTimeString()}]</span>
-                      <span className="text-foreground font-semibold tracking-tight">{e.event_type}</span>
-                    </div>
-                    {e.details && Object.keys(e.details).length > 0 && (
-                      <div className="mt-1 whitespace-pre-wrap text-[11px] text-muted-foreground/80 overflow-x-auto">
-                        {JSON.stringify(e.details, null, 2)}
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
+              ) : (() => {
+                const filteredEvents = [...events].filter(e => 
+                  !["AgentStepStarted", "AgentStepCompleted", "TokenUsageReported", "WorkspaceReadEvent", "WorkspaceWrittenEvent"].includes(e.event_type)
+                );
+                
+                if (filteredEvents.length === 0) {
+                  return (
+                    <span className="opacity-50 flex items-center gap-2 text-muted-foreground font-mono text-[12px]">
+                      No actionable events in this run yet.
+                    </span>
+                  );
+                }
+                
+                return filteredEvents.reverse().map((e, idx) => (
+                  <EventLogItem key={idx} event={e} />
+                ));
+              })()}
             </div>
           </div>
         </CardContent>
