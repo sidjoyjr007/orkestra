@@ -1,5 +1,5 @@
 import React from "react"
-import { Terminal, Cpu, Sparkles, Wrench, Shield, Server, LayoutDashboard, Activity } from "lucide-react"
+import { Terminal, Cpu, Sparkles, Wrench, Shield, Server, LayoutDashboard, Activity, GitMerge, Layers } from "lucide-react"
 
 export function SidebarContent({ currentPage, onNavigate }) {
   return (
@@ -44,6 +44,12 @@ export function SidebarContent({ currentPage, onNavigate }) {
             label="Observability"
             active={currentPage === "observability"}
             onClick={() => onNavigate("observability")}
+          />
+          <SidebarButton
+            icon={Layers}
+            label="Swarms"
+            active={currentPage === "swarms"}
+            onClick={() => onNavigate("swarms")}
           />
         </div>
       </div>

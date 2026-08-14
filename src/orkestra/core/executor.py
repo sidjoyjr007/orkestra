@@ -8,6 +8,7 @@ from orkestra.events.bus import EventBus
 from orkestra.events.base import ToolExecutionStarted, ToolExecutionCompleted, HumanApprovalRequested, HumanApprovalProvided, WorkflowPaused, GuardrailTriggered
 from orkestra.guardrails.base import GuardrailStage, GuardrailAction
 from orkestra.core.prompts import TOOL_LOOP_WARNING
+from orkestra.core.swarm import HandoffException
 from orkestra.core.telemetry import get_logger
 
 logger = get_logger("orkestra.core.executor")
@@ -160,6 +161,8 @@ class ToolExecutor:
                     error = None
                 except WorkflowPausedError as e:
                     raise e
+                except HandoffException as e:
+                    raise e
                 except Exception as e:
                     logger.error(f"Error executing tool '{tool_name}'", exc_info=True, extra={"extra_data": {"agent_id": self.agent.id, "tool_name": tool_name}})
                     result = f"Error executing '{tool_name}': {str(e)}"
@@ -266,6 +269,9 @@ class ToolExecutor:
                     error = None
                 except WorkflowPausedError as e:
                     # Bubble these up natively to the Orchestrator or Runner
+                    raise e
+                except HandoffException as e:
+                    # Bubble up so the orchestrator can switch agents
                     raise e
                 except Exception as e:
                     logger.error(f"Error executing tool '{tool_name}'", exc_info=True, extra={"extra_data": {"agent_id": self.agent.id, "tool_name": tool_name}})

@@ -16,10 +16,11 @@ class ToolRegistry:
     Connects to an external ChromaDB Vector Database to perform Semantic Tool Routing (Tool RAG).
     Assumes tools are pre-embedded by an external process.
     """
-    def __init__(self, url: str, agent_id: str, collection_name: str = "orkestra_tools", event_bus: Optional[Any] = None):
+    def __init__(self, url: str, agent_id: str, collection_name: str = "orkestra_tools", event_bus: Optional[Any] = None, authorized_tool_ids: Optional[List[str]] = None):
         self.url = url
         self.agent_id = agent_id
         self.event_bus = event_bus
+        self.authorized_tool_ids = authorized_tool_ids or []
         
         parsed = urlparse(url)
         host = parsed.hostname or "localhost"
@@ -50,10 +51,26 @@ class ToolRegistry:
             # Note: ChromaDB distances are often cosine distance or L2.
             # Assuming default L2, lower distance is more similar.
             # A threshold mapping might be required depending on the embedding function.
+            # If agent has no authorized tools, it cannot find any tools
+            if not self.authorized_tool_ids:
+                if self.event_bus:
+                    self.event_bus.publish(ToolSearchCompleted(agent_id=self.agent_id, tools_found=0))
+                return []
+
+            # We use an $in or $or query to allow the agent to search for MCPs or specific tools
+            # If a tool is an MCP tool, its tool_id is {mcp_id}_{tool_name}. But authorized_tool_ids contains the mcp_id.
+            # So we check if the tool's mcp_id is in authorized_tool_ids, OR the tool's tool_id is in authorized_tool_ids.
+            where_clause = {
+                "$or": [
+                    {"tool_id": {"$in": self.authorized_tool_ids}},
+                    {"mcp_id": {"$in": self.authorized_tool_ids}}
+                ]
+            }
+
             results = self.collection.query(
                 query_texts=[query],
                 n_results=top_k,
-                where={"agent_id": self.agent_id}
+                where=where_clause
             )
             
             tools = []

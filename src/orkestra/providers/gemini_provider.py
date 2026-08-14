@@ -151,6 +151,8 @@ class GeminiProvider(BaseProvider):
                 "type": t,
                 "description": v.get("description", "")
             }
+            if "enum" in v:
+                schema_kwargs["enum"] = v["enum"]
             
             if t == types.Type.ARRAY:
                 items = v.get("items", {"type": "string"})

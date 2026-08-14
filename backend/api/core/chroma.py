@@ -23,10 +23,10 @@ def get_chroma_collection(collection_name: str = "orkestra_tools"):
         logger.warning(f"Failed to connect to ChromaDB at {TOOL_REGISTRY_URL}: {e}")
         return None
 
-def embed_tool_in_vector_db(agent_id: str, tool_id: str, name: str, description: str, schema_dict: dict, tool_type: str, mcp_url: str = None, code: str = None):
+def embed_tool_in_vector_db(tool_id: str, name: str, description: str, schema_dict: dict, tool_type: str, mcp_url: str = None, mcp_id: str = None, code: str = None, network_access: bool = False):
     """
     Embeds a tool's semantic description into the vector DB for Tool RAG.
-    `agent_id` is required because tools are searched scoped to an agent.
+    Tools are embedded globally and filtered by authorized tool IDs during search.
     """
     collection = get_chroma_collection()
     if not collection:
@@ -36,42 +36,46 @@ def embed_tool_in_vector_db(agent_id: str, tool_id: str, name: str, description:
     document = f"{name}: {description}"
     
     metadata = {
-        "agent_id": agent_id,
         "tool_id": str(tool_id),
         "type": tool_type,
-        "schema": json.dumps(schema_dict)
+        "schema": json.dumps(schema_dict),
+        "network_access": network_access
     }
     
     if mcp_url:
         metadata["mcp_url"] = mcp_url
+    if mcp_id:
+        metadata["mcp_id"] = str(mcp_id)
     if code:
         metadata["code"] = code
         
     try:
-        # Document ID must be unique per agent-tool combination
-        doc_id = f"{agent_id}_{tool_id}"
+        # Document ID is just the tool_id since they are global
+        doc_id = str(tool_id)
         collection.upsert(
             documents=[document],
             metadatas=[metadata],
             ids=[doc_id]
         )
-        logger.info(f"Successfully embedded tool {name} (ID: {tool_id}) for agent {agent_id}")
+        logger.info(f"Successfully embedded tool {name} (ID: {tool_id}) globally")
     except Exception as e:
         logger.error(f"Failed to embed tool {tool_id} into ChromaDB: {e}")
 
-def delete_tool_from_vector_db(agent_id: str, tool_id: str):
+def delete_tool_from_vector_db(tool_id: str = None, mcp_id: str = None):
     """
-    Deletes a tool from the vector database.
+    Deletes a tool or all tools for an MCP from the vector database globally.
     """
     collection = get_chroma_collection()
     if not collection:
         return
         
     try:
-        doc_id = f"{agent_id}_{tool_id}"
-        collection.delete(ids=[doc_id])
+        if tool_id:
+            collection.delete(ids=[str(tool_id)])
+        elif mcp_id:
+            collection.delete(where={"mcp_id": str(mcp_id)})
     except Exception as e:
-        logger.error(f"Failed to delete tool {tool_id} from ChromaDB: {e}")
+        logger.error(f"Failed to delete tools from ChromaDB: {e}")
 
 def clear_agent_tools_from_vector_db(agent_id: str):
     """

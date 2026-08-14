@@ -2,19 +2,23 @@ import uuid
 import httpx
 import json
 import asyncio
+import os
+import json
+import asyncio
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from fastapi import HTTPException, status
 from fastapi.responses import StreamingResponse
 
-from backend.api.models.deployment import AgentDeployment
-from backend.api.models.agent import AgentConfig
-from backend.api.models.tool import Tool
-from backend.api.models.guardrail import GuardrailConfig
+from backend.api.models.deployment import AgentDeployment, SwarmDeployment
+from backend.api.models.swarm import Swarm
 from backend.api.models.llm import LlmConfig
 from backend.api.models.mcp import McpConfig
 from backend.api.models.hitl import HitlSession
+from backend.api.models.agent import AgentConfig
+from backend.api.models.tool import Tool
+from backend.api.models.guardrail import GuardrailConfig
 from backend.api.core.crypto import decrypt_secret
 from backend.api.core.deployment.provider import BaseDeploymentProvider
 
@@ -23,6 +27,8 @@ class DeploymentService:
         self.db = db
         self.provider = provider
         self.control_plane_url = control_plane_url
+
+
 
     async def deploy_agent(self, agent_id: str) -> dict:
         result = await self.db.execute(select(AgentConfig).where(AgentConfig.id == agent_id))
@@ -215,7 +221,16 @@ class DeploymentService:
         dep_result = await self.db.execute(select(AgentDeployment).where(AgentDeployment.agent_id == agent_id))
         deployment = dep_result.scalars().first()
         
-        if not deployment or deployment.deployment_token != token:
+        valid_token = False
+        if deployment and deployment.deployment_token == token:
+            valid_token = True
+            
+        if not valid_token:
+            swarm_dep_result = await self.db.execute(select(SwarmDeployment).where(SwarmDeployment.deployment_token == token))
+            if swarm_dep_result.scalars().first():
+                valid_token = True
+                
+        if not valid_token:
             raise PermissionError("Invalid deployment token")
             
         agent_result = await self.db.execute(select(AgentConfig).where(AgentConfig.id == agent_id))
@@ -271,6 +286,27 @@ class DeploymentService:
                 api_key = llm_config.api_key
                 actual_model = llm_config.model_name
                 
+        if not api_key:
+            if agent.llmProvider.lower() == "gemini":
+                api_key = os.environ.get("GEMINI_API_KEY")
+            elif agent.llmProvider.lower() == "openai":
+                api_key = os.environ.get("OPENAI_API_KEY")
+            elif agent.llmProvider.lower() == "anthropic":
+                api_key = os.environ.get("ANTHROPIC_API_KEY")
+                
+        # If still no api_key, grab ANY valid key for this provider from the DB
+        if not api_key and agent.llmProvider:
+            fallback_llm_res = await self.db.execute(
+                select(LlmConfig).where(
+                    LlmConfig.provider.ilike(agent.llmProvider),
+                    LlmConfig.api_key_encrypted.is_not(None)
+                )
+            )
+            fallback_llm = fallback_llm_res.scalars().first()
+            if fallback_llm:
+                api_key = fallback_llm.api_key
+        print(f"DEBUG: api_key resolved for {agent.name}: {api_key is not None}")
+                
         # Fetch MCP Servers
         mcps_data = []
         if getattr(agent, "selectedMcps", None):
@@ -300,5 +336,143 @@ class DeploymentService:
             "api_key": api_key,
             "tools": tools_data,
             "guardrails": guardrails_data,
-            "mcps": mcps_data
+            "mcps": mcps_data,
+            "authorized_tool_ids": [str(t) for t in agent.selectedTools] if agent.selectedTools else [],
+            "authorized_mcp_ids": [str(m) for m in agent.selectedMcps] if getattr(agent, "selectedMcps", None) else []
         }
+
+    async def deploy_swarm(self, swarm_id: str) -> dict:
+        result = await self.db.execute(select(Swarm).where(Swarm.id == swarm_id))
+        swarm = result.scalars().first()
+        if not swarm:
+            raise ValueError("Swarm not found")
+
+        # Check if already deployed
+        existing = await self.db.execute(select(SwarmDeployment).where(SwarmDeployment.swarm_id == swarm.id))
+        deployment = existing.scalars().first()
+        
+        deployment_token = str(uuid.uuid4())
+        
+        if not deployment:
+            deployment = SwarmDeployment(
+                swarm_id=swarm.id,
+                status="BUILDING",
+                deployment_token=deployment_token
+            )
+            self.db.add(deployment)
+        else:
+            deployment.status = "BUILDING"
+            deployment.deployment_token = deployment_token
+            
+        await self.db.commit()
+        
+        try:
+            deploy_result = await self.provider.deploy_swarm(str(swarm.id), self.control_plane_url, deployment_token)
+            deployment.container_id = deploy_result["container_id"]
+            deployment.port = deploy_result["port"]
+            deployment.status = "RUNNING"
+            await self.db.commit()
+            return {"status": "success", "container_id": deployment.container_id, "port": deployment.port}
+        except Exception as e:
+            deployment.status = "FAILED"
+            await self.db.commit()
+            raise ValueError(f"Deployment failed: {str(e)}")
+
+    async def get_swarm_deployment(self, swarm_id: str) -> dict:
+        result = await self.db.execute(select(SwarmDeployment).where(SwarmDeployment.swarm_id == swarm_id))
+        deployment = result.scalars().first()
+        if not deployment:
+            return {"status": "NOT_DEPLOYED"}
+            
+        if deployment.container_id:
+            current_status = await self.provider.get_status(deployment.container_id)
+            if current_status != deployment.status:
+                deployment.status = current_status
+                await self.db.commit()
+                
+        return {
+            "status": deployment.status,
+            "container_id": deployment.container_id,
+            "port": deployment.port,
+            "url": f"http://localhost:{deployment.port}" if deployment.port else None
+        }
+
+    async def stop_swarm(self, swarm_id: str) -> dict:
+        result = await self.db.execute(select(SwarmDeployment).where(SwarmDeployment.swarm_id == swarm_id))
+        deployment = result.scalars().first()
+        if not deployment or not deployment.container_id:
+            raise ValueError("Swarm is not deployed")
+            
+        await self.provider.stop(deployment.container_id)
+        deployment.status = "STOPPED"
+        await self.db.commit()
+        return {"status": "success"}
+
+    async def get_internal_swarm_config(self, swarm_id: str, token: str) -> dict:
+        dep_result = await self.db.execute(select(SwarmDeployment).where(SwarmDeployment.swarm_id == swarm_id))
+        deployment = dep_result.scalars().first()
+        
+        if not deployment or deployment.deployment_token != token:
+            raise PermissionError("Invalid deployment token")
+            
+        from sqlalchemy.orm import selectinload
+        swarm_result = await self.db.execute(select(Swarm).options(selectinload(Swarm.subagents)).where(Swarm.id == swarm_id))
+        swarm = swarm_result.scalars().first()
+        if not swarm:
+            raise ValueError("Swarm not found")
+            
+        subagents_data = []
+        for sa in swarm.subagents:
+            agent_res = await self.db.execute(select(AgentConfig).where(AgentConfig.id == sa.agent_id))
+            agent_obj = agent_res.scalars().first()
+            name = agent_obj.name if agent_obj else "Unknown Agent"
+            subagents_data.append({
+                "agent_id": str(sa.agent_id),
+                "name": name,
+                "role_description": sa.role_description
+            })
+            
+        return {
+            "id": str(swarm.id),
+            "name": swarm.name,
+            "leader_agent_id": str(swarm.leader_agent_id),
+            "subagents": subagents_data
+        }
+
+
+    async def proxy_swarm_chat_stream(self, swarm_id: str, payload_dict: dict) -> AsyncGenerator[bytes, None]:
+        dep_result = await self.db.execute(select(SwarmDeployment).where(SwarmDeployment.swarm_id == swarm_id))
+        deployment = dep_result.scalars().first()
+        
+        if not deployment or deployment.status != "RUNNING":
+            yield b'data: {"event_type": "Error", "details": {"content": "Swarm is not currently running. Please deploy it first."}}\n\n'
+            return
+            
+        runner_url = f"http://localhost:{deployment.port}/chat/stream"
+        
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            try:
+                async with client.stream("POST", runner_url, json=payload_dict) as response:
+                    response.raise_for_status()
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+            except httpx.ConnectError:
+                yield b'data: {"event_type": "Error", "details": {"content": "Failed to connect to swarm runner. It may still be booting up."}}\n\n'
+            except httpx.TimeoutException:
+                yield b'data: {"event_type": "Error", "details": {"content": "Swarm runner request timed out."}}\n\n'
+            except Exception as e:
+                yield f'data: {{"event_type": "Error", "details": {{"content": "Failed to communicate with swarm runner: {str(e)}"}}}}\n\n'.encode()
+
+    async def proxy_swarm_chat(self, swarm_id: str, payload_dict: dict) -> dict:
+        dep_result = await self.db.execute(select(SwarmDeployment).where(SwarmDeployment.swarm_id == swarm_id))
+        deployment = dep_result.scalars().first()
+        
+        if not deployment or deployment.status != "RUNNING":
+            raise ValueError("Swarm is not currently running. Please deploy it first.")
+            
+        runner_url = f"http://localhost:{deployment.port}/chat"
+        
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            response = await client.post(runner_url, json=payload_dict)
+            response.raise_for_status()
+            return response.json()

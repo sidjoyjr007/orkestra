@@ -108,14 +108,24 @@ if __name__ == '__main__':
 """
 
         try:
+            # Generate a unique workspace volume name based on the current deployment token
+            deployment_token = os.environ.get("DEPLOYMENT_TOKEN", "default_local_run")
+            volume_name = f"orkestra_workspace_{deployment_token}"
+            
+            # Ensure the volume exists
+            subprocess.run(["docker", "volume", "create", volume_name], capture_output=True)
+
             # Construct the hardened docker command
-            cmd = ["docker", "run", "-i", "--rm"]
+            cmd = [
+                "docker", "run", "-i", "--rm",
+                "-v", f"{volume_name}:/sandbox",
+                "-w", "/sandbox"
+            ]
             
             # Resource Limits & Security
             cmd.extend([
                 "--memory=512m", 
                 "--cpus=0.5", 
-                "--user=1000:1000", 
                 "--cap-drop=ALL"
             ])
             
@@ -179,4 +189,6 @@ class HostTool(Tool):
         except WorkflowPausedError:
             raise
         except Exception as e:
+            if type(e).__name__ == "HandoffException":
+                raise
             return f"Error executing native tool '{self.name}': {str(e)}"

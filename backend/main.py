@@ -8,7 +8,7 @@ from backend.middleware.timing import TimingMiddleware
 # from orkestra.events.bus import EventBus
 # from backend.telemetry.bridge import TelemetryBridge
 
-from backend.api.routes import auth, users, tools, roles, llms, agents, mcps, guardrails, deployments, telemetry, workspace
+from backend.api.routes import auth, users, tools, roles, llms, agents, mcps, guardrails, deployments, telemetry, workspace, swarms
 from backend.api.routes.api_keys import router as api_keys_router
 from backend.api.routes.hitl import router as hitl_router
 from backend.api.core.database import AsyncSessionLocal, engine, Base
@@ -99,6 +99,8 @@ app.include_router(guardrails.router, prefix="/api/guardrails", tags=["guardrail
 app.include_router(deployments.router, prefix="/api/deployments", tags=["deployments"])
 app.include_router(telemetry.router, prefix="/api/telemetry", tags=["telemetry"])
 app.include_router(workspace.router, prefix="/api/workspace", tags=["workspace"])
+app.include_router(swarms.router, prefix="/api/swarms", tags=["swarms"])
+
 
 @app.get("/health")
 async def health_check():

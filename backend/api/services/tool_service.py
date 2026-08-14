@@ -11,6 +11,7 @@ from sqlalchemy.future import select
 from sqlalchemy import or_, cast, String, func
 from backend.api.models.tool import Tool
 from backend.api.core.crypto import encrypt_secret, decrypt_secret
+from backend.api.core.chroma import embed_tool_in_vector_db, delete_tool_from_vector_db
 
 class ToolService:
     def __init__(self, db: AsyncSession):
@@ -168,6 +169,41 @@ class ToolService:
             self.db.add(new_tool)
             
         await self.db.commit()
+        
+        # Build schema dict for embedding
+        properties = {}
+        required = []
+        for p in params_list:
+            properties[p["name"]] = {
+                "type": p.get("type", "string"),
+                "description": p.get("description", "")
+            }
+            if p.get("required"):
+                required.append(p["name"])
+                
+        schema_dict = {
+            "type": "function",
+            "function": {
+                "name": payload_dict["name"],
+                "description": payload_dict["desc"],
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required
+                }
+            }
+        }
+        
+        # Embed tool globally
+        embed_tool_in_vector_db(
+            tool_id=str(tool_id),
+            name=payload_dict["name"],
+            description=payload_dict["desc"],
+            schema_dict=schema_dict,
+            tool_type=payload_dict.get("tool_type", "SANDBOX"),
+            code=payload_dict["script"]
+        )
+        
         return str(tool_id)
 
     async def delete_tool(self, tool_id: str, user_id: str, user_role: str) -> None:
@@ -182,6 +218,9 @@ class ToolService:
             
         await self.db.delete(tool)
         await self.db.commit()
+        
+        # Remove from vector db
+        delete_tool_from_vector_db(tool_id=tool_id)
 
     async def execute_tool(
         self,

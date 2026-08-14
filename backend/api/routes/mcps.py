@@ -10,10 +10,64 @@ from backend.api.core.database import get_db
 from backend.api.core.dependencies import get_current_user_token, require_permission
 from backend.api.models.mcp import McpConfig
 from backend.api.core.crypto import encrypt_secret, decrypt_secret
+from backend.api.core.chroma import embed_tool_in_vector_db, delete_tool_from_vector_db
 from mcp.client.sse import sse_client
 from mcp.client.session import ClientSession
+import asyncio
 
 router = APIRouter()
+
+async def _sync_mcp_tools(mcp: McpConfig):
+    """Fetches all tools from the MCP server and embeds them globally in ChromaDB."""
+    # Build final headers
+    headers_dict = mcp.headers or {}
+    final_headers = {}
+    for k, v in headers_dict.items():
+        val = str(v)
+        for secret in (mcp.secrets or []):
+            key_name = secret.get("key")
+            encrypted_val = secret.get("value")
+            if encrypted_val:
+                try:
+                    decrypted_val = decrypt_secret(encrypted_val)
+                    val = val.replace(f"{{{{{key_name}}}}}", decrypted_val)
+                except Exception:
+                    pass
+        final_headers[k] = val
+
+    try:
+        async with sse_client(mcp.endpoint, headers=final_headers) as streams:
+            async with ClientSession(streams[0], streams[1]) as session:
+                await session.initialize()
+                tools_response = await session.list_tools()
+                
+                # Delete existing tools for this MCP before syncing
+                delete_tool_from_vector_db(mcp_id=mcp.id)
+                
+                for t in tools_response.tools:
+                    # Construct a unique tool_id for the MCP tool
+                    tool_id = f"{mcp.id}_{t.name}"
+                    
+                    schema_dict = {
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description or "No description provided.",
+                            "parameters": t.inputSchema
+                        }
+                    }
+                    
+                    embed_tool_in_vector_db(
+                        tool_id=tool_id,
+                        name=t.name,
+                        description=t.description or "",
+                        schema_dict=schema_dict,
+                        tool_type="mcp",
+                        mcp_url=mcp.endpoint,
+                        mcp_id=mcp.id
+                    )
+    except Exception as e:
+        print(f"Error syncing MCP tools for {mcp.name}: {e}")
 
 class McpSecret(BaseModel):
     key: str
@@ -122,6 +176,9 @@ async def create_mcp(
     await db.commit()
     await db.refresh(new_mcp)
     
+    # Sync tools asynchronously
+    asyncio.create_task(_sync_mcp_tools(new_mcp))
+    
     safe_env_vars = [{"key": secret.get("key"), "value": ""} for secret in new_mcp.secrets] if new_mcp.secrets else []
     
     return McpResponse(
@@ -188,6 +245,9 @@ async def update_mcp(
     await db.commit()
     await db.refresh(mcp)
     
+    # Sync tools asynchronously
+    asyncio.create_task(_sync_mcp_tools(mcp))
+    
     safe_env_vars = [{"key": secret.get("key"), "value": ""} for secret in mcp.secrets] if mcp.secrets else []
     
     return McpResponse(
@@ -218,6 +278,10 @@ async def delete_mcp(
 
     await db.delete(mcp)
     await db.commit()
+    
+    # Remove tools from vector db
+    delete_tool_from_vector_db(mcp_id=mcp_id)
+    
     return None
 
 class McpTestResponse(BaseModel):

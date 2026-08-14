@@ -66,6 +66,13 @@ class MCPTool(Tool):
                     
             return "\n".join(output_text)
         except Exception as e:
+            import traceback
+            tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            logger.error(f"MCP Tool Exception:\n{tb}")
+            
+            if isinstance(e, BaseExceptionGroup):
+                sub_errs = ", ".join(repr(err) for err in e.exceptions)
+                raise RuntimeError(f"Tool execution failed: {e} ({sub_errs})")
             raise RuntimeError(f"Tool execution failed: {e}")
 
 class MCPHttpToolkit:

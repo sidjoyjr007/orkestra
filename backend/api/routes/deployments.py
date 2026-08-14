@@ -41,6 +41,39 @@ async def deploy_agent(
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Deployment failed: {str(e)}")
 
+@router.post("/swarm/{swarm_id}/deploy")
+async def deploy_swarm(
+    swarm_id: str,
+    user: dict = Depends(get_current_user_token),
+    service: DeploymentService = Depends(get_deployment_service)
+):
+    try:
+        return await service.deploy_swarm(swarm_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Swarm deployment failed: {str(e)}")
+
+@router.get("/swarm/{swarm_id}/status")
+async def get_swarm_deployment_status(
+    swarm_id: str,
+    user: dict = Depends(get_current_user_token),
+    service: DeploymentService = Depends(get_deployment_service)
+):
+    return await service.get_swarm_deployment(swarm_id)
+
+@router.post("/swarm/{swarm_id}/stop")
+async def stop_swarm_deployment(
+    swarm_id: str,
+    user: dict = Depends(get_current_user_token),
+    service: DeploymentService = Depends(get_deployment_service)
+):
+    try:
+        await service.stop_swarm(swarm_id)
+        return {"message": "Swarm deployment stopped successfully"}
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
 @router.get("/{agent_id}/status")
 async def get_deployment_status(
     agent_id: str,
@@ -113,15 +146,80 @@ async def get_session_messages(
     result = await db.execute(query)
     models = result.scalars().all()
     
-    # We want to format these similarly to how they stream, or just dump them
-    return [
-        {
+    # Filter out internal telemetry so the UI only sees clean user/assistant dialogue
+    filtered_messages = []
+    last_assistant_content = None
+    
+    for m in models:
+        # Hide system prompts and raw tool outputs
+        if m.role in ["system", "tool"]:
+            continue
+            
+        # Hide auto-injected Workflow Context blobs that pollute user chat history
+        if m.role == "user" and m.content and str(m.content).strip().startswith("Workflow Context:"):
+            continue
+            
+        # Hide assistant messages that are purely silent tool-calls (no text response)
+        if m.role == "assistant" and (not m.content or str(m.content).strip() == ""):
+            continue
+            
+        # Deduplicate consecutive identical assistant outputs (caused by tool-use loops)
+        if m.role == "assistant":
+            current_content = str(m.content).strip()
+            if current_content == last_assistant_content:
+                continue
+            last_assistant_content = current_content
+        else:
+            last_assistant_content = None
+            
+        filtered_messages.append({
             "id": m.id,
             "role": m.role,
             "content": m.content,
             "name": m.name,
-            "tool_calls": m.tool_calls,
-            "tool_call_id": m.tool_call_id,
             "created_at": m.created_at.isoformat() if m.created_at else None
-        } for m in models
-    ]
+        })
+        
+    return filtered_messages
+
+@router.get("/internal/swarm_config/{swarm_id}")
+async def get_internal_swarm_config(
+    swarm_id: str,
+    token: str,
+    service: DeploymentService = Depends(get_deployment_service)
+):
+    try:
+        return await service.get_internal_swarm_config(swarm_id, token)
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+@router.post("/swarm/{swarm_id}/chat")
+async def proxy_swarm_chat(
+    swarm_id: str,
+    payload: ChatRequest,
+    user: dict = Depends(get_current_user_token),
+    service: DeploymentService = Depends(get_deployment_service)
+):
+    try:
+        return await service.proxy_swarm_chat(swarm_id, payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"Swarm runner returned error: {e.response.text}")
+
+@router.post("/swarm/{swarm_id}/chat/stream")
+async def proxy_swarm_chat_stream(
+    swarm_id: str,
+    payload: ChatRequest,
+    user: dict = Depends(get_current_user_token),
+    service: DeploymentService = Depends(get_deployment_service)
+):
+    try:
+        return StreamingResponse(
+            service.proxy_swarm_chat_stream(swarm_id, payload.model_dump()),
+            media_type="text/event-stream"
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

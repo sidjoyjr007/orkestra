@@ -18,10 +18,11 @@ from backend.api.models.mcp import McpConfig
 from backend.api.models.guardrail import GuardrailConfig
 from backend.api.models.role import Role
 from backend.api.models.tool import Tool
-from backend.api.models.deployment import AgentDeployment
+from backend.api.models.deployment import AgentDeployment, SwarmDeployment
 from backend.api.models.telemetry import AgentRun, RunEvent
 from backend.api.models.api_key import ApiKey
 from backend.api.models.hitl import HitlSession
+from backend.api.models.swarm import Swarm, SwarmAgent
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -57,11 +58,17 @@ def run_migrations_offline() -> None:
 
     """
     url = config.get_main_option("sqlalchemy.url")
+    def include_object(object, name, type_, reflected, compare_to):
+        if type_ == "table" and name in ["orkestra_messages", "orkestra_agent_states", "orkestra_plans", "workspaces", "organizations", "user_workspace_roles"]:
+            return False
+        return True
+
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -69,7 +76,12 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    def include_object(object, name, type_, reflected, compare_to):
+        if type_ == "table" and name in ["orkestra_messages", "orkestra_agent_states", "orkestra_plans", "workspaces", "organizations", "user_workspace_roles"]:
+            return False
+        return True
+
+    context.configure(connection=connection, target_metadata=target_metadata, include_object=include_object)
 
     with context.begin_transaction():
         context.run_migrations()

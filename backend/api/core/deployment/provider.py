@@ -14,6 +14,11 @@ class BaseDeploymentProvider(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def deploy_swarm(self, swarm_id: str, control_plane_url: str, deployment_token: str) -> dict:
+        """Deploys a swarm and returns metadata like container_id and port"""
+        pass
+
+    @abc.abstractmethod
     async def stop(self, container_id: str):
         pass
 
@@ -39,21 +44,18 @@ class LocalDockerProvider(BaseDeploymentProvider):
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             return s.getsockname()[1]
 
-    async def deploy(self, agent_id: str, control_plane_url: str, deployment_token: str) -> dict:
-        port = self._find_free_port()
-        container_name = f"orkestra-agent-{agent_id}-{uuid.uuid4().hex[:6]}"
-        
-        # We assume the generic runner image exposes port 8000 internally.
-        cmd = [
-            "docker", "run", "-d",
+    async def _run_container(self, cmd_prefix, container_name, port, control_plane_url, extra_env=None, override_cmd=None):
+        cmd = cmd_prefix + [
             "--name", container_name,
             "-p", f"{port}:8000",
             "-v", "/var/run/docker.sock:/var/run/docker.sock",
-            "-e", f"AGENT_ID={agent_id}",
-            "-e", f"CONTROL_PLANE_URL={control_plane_url}",
-            "-e", f"DEPLOYMENT_TOKEN={deployment_token}"
+            "-e", f"CONTROL_PLANE_URL={control_plane_url}"
         ]
         
+        if extra_env:
+            for k, v in extra_env.items():
+                cmd.extend(["-e", f"{k}={v}"])
+                
         # Forward API Keys from Host to Container
         api_keys = ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TAVILY_API_KEY"]
         for key in api_keys:
@@ -76,6 +78,9 @@ class LocalDockerProvider(BaseDeploymentProvider):
                 
         cmd.append(self.image_name)
         
+        if override_cmd:
+            cmd.extend(override_cmd)
+        
         try:
             # We run synchronously for local deployment, but this should be non-blocking in prod
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -87,6 +92,42 @@ class LocalDockerProvider(BaseDeploymentProvider):
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to deploy docker container: {e.stderr}")
             raise Exception(f"Docker deployment failed: {e.stderr}")
+
+    async def deploy(self, agent_id: str, control_plane_url: str, deployment_token: str) -> dict:
+        port = self._find_free_port()
+        container_name = f"orkestra-agent-{agent_id}-{uuid.uuid4().hex[:6]}"
+        extra_env = {
+            "AGENT_ID": agent_id,
+            "DEPLOYMENT_TOKEN": deployment_token
+        }
+        return await self._run_container(["docker", "run", "-d"], container_name, port, control_plane_url, extra_env)
+
+    async def deploy_swarm(self, swarm_id: str, control_plane_url: str, deployment_token: str) -> dict:
+        port = self._find_free_port()
+        container_name = f"orkestra-swarm-{swarm_id}-{uuid.uuid4().hex[:6]}"
+        
+        extra_env = {
+            "SWARM_ID": swarm_id,
+            "DEPLOYMENT_TOKEN": deployment_token
+        }
+        
+        # We need to mount our new swarm_runner.py and the latest orkestra code
+        swarm_runner_path = "/Users/siddeshhn/Desktop/orkestra/deployments/runner/swarm_runner.py"
+        src_path = "/Users/siddeshhn/Desktop/orkestra/src/orkestra"
+        cmd_prefix = [
+            "docker", "run", "-d",
+            "-v", f"{swarm_runner_path}:/app/swarm_runner.py",
+            "-v", f"{src_path}:/app/orkestra"
+        ]
+        
+        return await self._run_container(
+            cmd_prefix, 
+            container_name, 
+            port, 
+            control_plane_url, 
+            extra_env, 
+            override_cmd=["python", "swarm_runner.py"]
+        )
 
     async def stop(self, container_id: str):
         try:

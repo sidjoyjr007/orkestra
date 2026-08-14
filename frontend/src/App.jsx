@@ -1,4 +1,4 @@
-import React, { useEffect, createContext } from "react"
+import React, { useState, useEffect, createContext } from "react"
 import { useLocation, useNavigate, Routes, Route, Navigate, useParams } from "react-router-dom"
 import { Toaster } from "sonner"
 import { AppLayout } from "@/components/layout/AppLayout"
@@ -20,6 +20,10 @@ import { AdminApprovals } from "@/pages/AdminApprovals"
 import { ChatConsole } from "@/pages/ChatConsole"
 import { ObservabilityHub } from "@/pages/ObservabilityHub"
 import ApiKeys from "@/pages/ApiKeys"
+import SwarmsHub from "@/pages/SwarmsHub"
+import { ManageSwarm } from "@/pages/ManageSwarm"
+import { CreateSwarm } from "@/pages/CreateSwarm"
+import { apiClient } from "@/lib/apiClient"
 
 import { useSelector, useDispatch } from "react-redux"
 import { removeTool } from "@/store/slices/toolsSlice"
@@ -33,6 +37,33 @@ const CreateAgentWrapper = ({ agents, availableTools, onSave, onBack }) => {
   const { uuid } = useParams()
   const agent = uuid ? agents.find(a => a.id === uuid) : null
   return <CreateAgent initialData={agent} availableTools={availableTools} onSave={onSave} onBack={onBack} />
+}
+
+const CreateSwarmWrapper = ({ onBack }) => {
+  const { uuid } = useParams()
+  const [swarm, setSwarm] = useState(null)
+  const [loading, setLoading] = useState(!!uuid)
+
+  useEffect(() => {
+    if (uuid) {
+      apiClient.get('/api/swarms').then(data => {
+        const found = data.find(s => s.id === uuid)
+        setSwarm(found)
+        setLoading(false)
+      }).catch(e => {
+        console.error("Failed to fetch swarm for edit", e)
+        setLoading(false)
+      })
+    } else {
+      setSwarm(null)
+      setLoading(false)
+    }
+  }, [uuid])
+
+  if (loading) return <div className="p-8">Loading swarm data...</div>
+  
+  // We add a key here to force remount when switching between create (no uuid) and edit (with uuid)
+  return <CreateSwarm key={uuid || 'create'} initialData={swarm} onBack={onBack} />
 }
 
 export default function App() {
@@ -70,6 +101,9 @@ export default function App() {
     if (path === "/mcp/create") return "mcp"
     if (path.startsWith("/agents/edit/")) return "create-agent"
     if (path.startsWith("/chat/")) return "chat"
+    if (path.startsWith("/swarms/edit/")) return "swarms"
+    if (path === "/swarms/create") return "swarms"
+    if (path.startsWith("/swarms")) return "swarms"
     if (path.startsWith("/observability")) return "observability"
     return path.substring(1) || "profile"
   }
@@ -215,6 +249,10 @@ export default function App() {
             <Route path="/api-keys" element={<ApiKeys />} />
             <Route path="/approvals" element={<AdminApprovals />} />
             <Route path="/roles" element={<RoleManagement />} />
+            <Route path="/swarms" element={<SwarmsHub />} />
+            <Route path="/swarms/create" element={<CreateSwarmWrapper onBack={() => navigateTo("swarms")} />} />
+            <Route path="/swarms/edit/:uuid" element={<CreateSwarmWrapper onBack={() => navigateTo("swarms")} />} />
+            <Route path="/manage-swarm/:id" element={<ManageSwarm />} />
             <Route path="/chat/:uuid" element={<ChatConsole />} />
             <Route path="/observability" element={<ObservabilityHub />} />
             <Route path="*" element={<Navigate to="/profile" replace />} />

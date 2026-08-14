@@ -2,11 +2,11 @@ from typing import List
 from orkestra.core.tools import Tool, HostTool
 from orkestra.workspace.base import BaseWorkspaceStore, Plan, Task
 
-def get_planning_tools(session_id: str, workspace: BaseWorkspaceStore) -> List[Tool]:
+def get_planning_tools(agent, workspace: BaseWorkspaceStore) -> List[Tool]:
     
     async def create_plan(tasks: list[str]) -> str:
         """Create a new active plan, archiving any existing active plan."""
-        plan = Plan(session_id=session_id, status="ACTIVE")
+        plan = Plan(session_id=agent.session_id, status="ACTIVE")
         for i, t_desc in enumerate(tasks):
             plan.tasks.append(Task(id=i+1, description=t_desc))
         await workspace.asave_plan(plan)
@@ -14,7 +14,7 @@ def get_planning_tools(session_id: str, workspace: BaseWorkspaceStore) -> List[T
         
     async def batch_update_tasks(updates: list[dict]) -> str:
         """Batch update statuses of tasks (TODO, IN_PROGRESS, DONE, BLOCKED) and add optional notes."""
-        plan = await workspace.aget_active_plan(session_id)
+        plan = await workspace.aget_active_plan(agent.session_id)
         if not plan:
             return "Error: No active plan found."
             
@@ -49,7 +49,7 @@ def get_planning_tools(session_id: str, workspace: BaseWorkspaceStore) -> List[T
         
     async def add_task(description: str) -> str:
         """Add a new task to the end of the active plan."""
-        plan = await workspace.aget_active_plan(session_id)
+        plan = await workspace.aget_active_plan(agent.session_id)
         if not plan:
             return "Error: No active plan found."
             

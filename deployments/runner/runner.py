@@ -320,47 +320,7 @@ async def lifespan(app: FastAPI):
         workspace_store = PostgresWorkspaceStore(WORKSPACE_DB_URL, event_bus=event_bus)
         await workspace_store.initialize()
 
-    if TOOL_REGISTRY_URL:
-        import chromadb
-        from urllib.parse import urlparse
-        parsed = urlparse(TOOL_REGISTRY_URL)
-        try:
-            chroma_client = chromadb.HttpClient(host=parsed.hostname or "localhost", port=parsed.port or 8100)
-            collection = chroma_client.get_or_create_collection("orkestra_tools")
-            collection.delete(where={"agent_id": AGENT_ID})
-            
-            docs = []
-            metadatas = []
-            ids = []
-            from orkestra.mcp.http_client import MCPTool
-            
-            for idx, t in enumerate(agent_tools):
-                docs.append(f"{t.name}: {t.description}")
-                code = getattr(t.func, "__source_code__", None) if hasattr(t, "func") else None
-                t_type = "mcp" if isinstance(t, MCPTool) else "sandbox"
-                
-                meta = {
-                    "agent_id": AGENT_ID,
-                    "tool_id": str(idx),
-                    "type": t_type,
-                    "schema": json.dumps(t.schema),
-                    "dependencies": json.dumps(getattr(t, "dependencies", []) or []),
-                    "network_access": getattr(t, "network_access", False),
-                    "requires_approval": getattr(t, "requires_approval", False)
-                }
-                if code:
-                    meta["code"] = code
-                if isinstance(t, MCPTool):
-                    meta["mcp_url"] = getattr(t, "url", getattr(t, "_url", ""))
-                    
-                metadatas.append(meta)
-                ids.append(f"{AGENT_ID}_{idx}")
-            
-            if docs:
-                collection.upsert(documents=docs, metadatas=metadatas, ids=ids)
-                print(f"Embedded {len(docs)} tools into VectorDB for Agent {AGENT_ID}")
-        except Exception as e:
-            print(f"Warning: failed to embed tools in VectorDB: {e}")
+
 
     from orkestra.core.context import TokenSummarizationStrategy
     
@@ -380,6 +340,7 @@ async def lifespan(app: FastAPI):
         memory=memory_store,
         workspace=workspace_store,
         tool_registry_url=TOOL_REGISTRY_URL,
+        authorized_tool_ids=config.get("authorized_tool_ids", []) + config.get("authorized_mcp_ids", []),
         guardrails=agent_guardrails,
         event_bus=event_bus,
         id=AGENT_ID,
