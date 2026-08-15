@@ -57,6 +57,7 @@ export function CreateTool({ onSave, onBack }) {
   const [allowedRoles, setAllowedRoles] = useState([])
   const [roleOptions, setRoleOptions] = useState([])
   const [requiresApproval, setRequiresApproval] = useState(false)
+  const [networkAccess, setNetworkAccess] = useState(false)
   const [status, setStatus] = useState("DRAFT")
   const [params, setParams] = useState([
     { id: Date.now(), name: "", description: "", type: "str", default: "", required: false }
@@ -79,6 +80,7 @@ export function CreateTool({ onSave, onBack }) {
           setIsPublic(matched.is_public || false)
           setAllowedRoles(matched.allowed_roles || [])
           setRequiresApproval(matched.requires_approval || false)
+          setNetworkAccess(matched.network_access || false)
           setStatus(matched.status || "DRAFT")
           setScript(matched.script || "")
           setEnvVars(matched.envVars || [])
@@ -183,6 +185,7 @@ export function CreateTool({ onSave, onBack }) {
       is_public: isPublic,
       allowed_roles: allowedRoles,
       requires_approval: requiresApproval,
+      network_access: networkAccess,
       status: forcedStatus
     }
 
@@ -327,6 +330,36 @@ export function CreateTool({ onSave, onBack }) {
                     className={`text-[11px] px-3 py-1 rounded-sm transition-all cursor-pointer ${requiresApproval ? "bg-background shadow-sm font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}`}
                   >
                     Required
+                  </button>
+                </div>
+              </div>
+              
+              {/* Network Access */}
+              <div className="flex items-center justify-between group">
+                <span className="text-[13px] font-medium text-foreground flex items-center gap-2">
+                  <ShieldCheck className="h-4 w-4 text-emerald-500" />
+                  Network Access
+                  <div className="relative flex items-center group/tooltip">
+                    <Info className="h-3.5 w-3.5 text-muted-foreground cursor-help hover:text-foreground transition-colors" />
+                    <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 w-56 p-2 bg-popover text-popover-foreground text-[11px] rounded-md shadow-md border opacity-0 invisible group-hover/tooltip:opacity-100 group-hover/tooltip:visible transition-all z-10 text-center pointer-events-none">
+                      Disable the strict sandbox isolation to allow this tool to make outbound internet requests.
+                    </div>
+                  </div>
+                </span>
+                <div className="flex bg-muted/60 p-0.5 rounded-md border border-border/50">
+                  <button
+                    type="button"
+                    onClick={() => setNetworkAccess(false)}
+                    className={`text-[11px] px-3 py-1 rounded-sm transition-all cursor-pointer ${!networkAccess ? "bg-background shadow-sm font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                  >
+                    Isolated
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNetworkAccess(true)}
+                    className={`text-[11px] px-3 py-1 rounded-sm transition-all cursor-pointer ${networkAccess ? "bg-background shadow-sm font-medium text-amber-500" : "text-muted-foreground hover:text-foreground"}`}
+                  >
+                    Internet
                   </button>
                 </div>
               </div>

@@ -29,6 +29,7 @@ export function ManageAgent({ agents = [], onBack }) {
   // Telemetry state
   const [runs, setRuns] = useState([])
   const [events, setEvents] = useState([])
+  const [stats, setStats] = useState({ total_runs: 0, active_executions: 0, total_tokens: 0 })
   
   // Workspace state
   const [activePlan, setActivePlan] = useState(null)
@@ -64,6 +65,12 @@ export function ManageAgent({ agents = [], onBack }) {
             setEvents(evData || [])
           }
         }
+      }
+      
+      const statsRes = await fetch(`${API_BASE_URL}/api/telemetry/stats?agent_id=${id}`, { credentials: "include" })
+      if (statsRes.ok) {
+        const statsData = await statsRes.json()
+        setStats(statsData)
       }
     } catch (e) {
       console.error("Failed to fetch telemetry", e)
@@ -338,9 +345,9 @@ export function ManageAgent({ agents = [], onBack }) {
   }
   
   // Calculate metrics
-  const activeExecutions = runs.filter(r => r.status === "IN_PROGRESS").length
-  const totalRuns = runs.length
-  const tokensConsumed = runs.reduce((acc, r) => acc + (r.total_tokens || 0), 0)
+  const activeExecutions = stats.active_executions
+  const totalRuns = stats.total_runs
+  const tokensConsumed = stats.total_tokens
   
   const uniqueSessions = [...new Map(runs.map(r => [r.session_id, r])).values()];
 
@@ -558,7 +565,7 @@ export function ManageAgent({ agents = [], onBack }) {
                     m.role === 'system' ? 'bg-destructive/10 text-destructive rounded-tl-sm' : 
                     'bg-muted rounded-tl-sm'
                   }`}>
-                    {m.content?.trim() ? renderMessageContent(m.content, i === messages.length - 1 && isSending) : (
+                    {typeof m.content === 'string' && m.content.trim() ? renderMessageContent(m.content, i === messages.length - 1 && isSending) : (
                       <div className="flex items-center gap-1 py-1.5 px-0.5 select-none">
                         <span className="h-1.5 w-1.5 rounded-full bg-foreground/40 animate-bounce" style={{ animationDelay: "0ms" }} />
                         <span className="h-1.5 w-1.5 rounded-full bg-foreground/40 animate-bounce" style={{ animationDelay: "150ms" }} />
@@ -686,7 +693,7 @@ export function ManageAgent({ agents = [], onBack }) {
               </div>
               <div className="flex-1 p-6 text-center bg-muted/10 relative overflow-hidden flex flex-col items-center justify-center">
                 <div className="text-[10px] uppercase text-muted-foreground font-semibold tracking-wider mb-2">Total Tokens Consumed</div>
-                <div className="text-4xl font-extrabold font-mono text-foreground">{tokensConsumed}</div>
+                <div className="text-4xl font-extrabold font-mono text-foreground">{tokensConsumed.toLocaleString()}</div>
               </div>
             </CardContent>
           </Card>

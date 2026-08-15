@@ -49,12 +49,16 @@ class LocalDockerProvider(BaseDeploymentProvider):
             "--name", container_name,
             "-p", f"{port}:8000",
             "-v", "/var/run/docker.sock:/var/run/docker.sock",
+            "-v", f"{os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../../src'))}:/app/src",
             "-e", f"CONTROL_PLANE_URL={control_plane_url}"
         ]
         
         if extra_env:
             for k, v in extra_env.items():
                 cmd.extend(["-e", f"{k}={v}"])
+                
+        # Force Python to use mounted source code instead of stale site-packages
+        cmd.extend(["-e", "PYTHONPATH=/app/src:/app"])
                 
         # Forward API Keys from Host to Container
         api_keys = ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TAVILY_API_KEY"]

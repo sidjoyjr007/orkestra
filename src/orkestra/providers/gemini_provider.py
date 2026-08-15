@@ -214,16 +214,52 @@ class GeminiProvider(BaseProvider):
         if tools:
             gemini_tools = self._convert_tools_to_gemini(tools)
             
+        # Prompt Caching Logic
+        cached_content_name = None
+        if system_instruction and len(system_instruction) > 100000:
+            import hashlib
+            import json
+            
+            # Simple hash of the static context
+            tool_str = json.dumps(tools, default=lambda x: str(x)) if tools else ""
+            ctx_hash = hashlib.md5((system_instruction + tool_str).encode()).hexdigest()
+            
+            if not hasattr(self, "_active_caches"):
+                self._active_caches = {}
+                
+            if ctx_hash in self._active_caches:
+                cached_content_name = self._active_caches[ctx_hash]
+            else:
+                try:
+                    cache = self.client.caches.create(
+                        model=self.model_name,
+                        config=types.CreateCachedContentConfig(
+                            system_instruction=system_instruction,
+                            tools=gemini_tools,
+                            ttl="600s"
+                        )
+                    )
+                    self._active_caches[ctx_hash] = cache.name
+                    cached_content_name = cache.name
+                except Exception:
+                    pass
+
+        config_kwargs = {
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+            **kwargs
+        }
+        
+        if cached_content_name:
+            config_kwargs["cached_content"] = cached_content_name
+        else:
+            config_kwargs["system_instruction"] = system_instruction
+            config_kwargs["tools"] = gemini_tools
+
         response = self.client.models.generate_content(
             model=self.model_name,
             contents=formatted_messages,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-                tools=gemini_tools,
-                **kwargs
-            )
+            config=types.GenerateContentConfig(**config_kwargs)
         )
         
         tool_calls = None
@@ -334,17 +370,53 @@ class GeminiProvider(BaseProvider):
         gemini_tools = None
         if tools:
             gemini_tools = self._convert_tools_to_gemini(tools)
-        print("system instruction :", system_instruction)
+
+        # Prompt Caching Logic
+        cached_content_name = None
+        if system_instruction and len(system_instruction) > 100000:
+            import hashlib
+            import json
+            
+            # Simple hash of the static context
+            tool_str = json.dumps(tools, default=lambda x: str(x)) if tools else ""
+            ctx_hash = hashlib.md5((system_instruction + tool_str).encode()).hexdigest()
+            
+            if not hasattr(self, "_active_caches"):
+                self._active_caches = {}
+                
+            if ctx_hash in self._active_caches:
+                cached_content_name = self._active_caches[ctx_hash]
+            else:
+                try:
+                    cache = self.client.caches.create(
+                        model=self.model_name,
+                        config=types.CreateCachedContentConfig(
+                            system_instruction=system_instruction,
+                            tools=gemini_tools,
+                            ttl="600s"
+                        )
+                    )
+                    self._active_caches[ctx_hash] = cache.name
+                    cached_content_name = cache.name
+                except Exception:
+                    pass
+
+        config_kwargs = {
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+            **kwargs
+        }
+        
+        if cached_content_name:
+            config_kwargs["cached_content"] = cached_content_name
+        else:
+            config_kwargs["system_instruction"] = system_instruction
+            config_kwargs["tools"] = gemini_tools
+
         response = await self.client.aio.models.generate_content(
             model=self.model_name,
             contents=formatted_messages,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-                tools=gemini_tools,
-                **kwargs
-            )
+            config=types.GenerateContentConfig(**config_kwargs)
         )
         
         tool_calls = None

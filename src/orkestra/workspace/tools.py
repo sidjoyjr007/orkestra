@@ -84,7 +84,7 @@ def get_planning_tools(agent, workspace: BaseWorkspaceStore) -> List[Tool]:
         ),
         HostTool(
             name="batch_update_tasks",
-            description="Batch update task statuses and add notes. Bundle multiple transitions (e.g. marking one DONE and the next IN_PROGRESS) into a single call. Status must be: TODO, IN_PROGRESS, DONE, or BLOCKED.",
+            description="Batch update task statuses and add notes. You can update multiple tasks simultaneously (e.g. marking 3 parallel tasks as DONE). Status must be: TODO, IN_PROGRESS, DONE, or BLOCKED.",
             func=batch_update_tasks,
             schema={
                 "type": "function",

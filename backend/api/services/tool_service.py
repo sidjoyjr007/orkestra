@@ -79,6 +79,7 @@ class ToolService:
                 "tool_type": t.tool_type,
                 "is_public": t.is_public,
                 "requires_approval": t.requires_approval,
+                "network_access": t.network_access,
                 "status": t.status,
                 "dependencies": t.dependencies or [],
                 "allowed_roles": t.allowed_roles or [],
@@ -142,6 +143,7 @@ class ToolService:
             existing_tool.tool_type = payload_dict.get("tool_type", "SANDBOX")
             existing_tool.is_public = payload_dict.get("is_public", False)
             existing_tool.requires_approval = payload_dict.get("requires_approval", False)
+            existing_tool.network_access = payload_dict.get("network_access", False)
             existing_tool.status = payload_dict.get("status", "DRAFT")
             existing_tool.dependencies = deps
             existing_tool.entry_point = entry_point
@@ -160,6 +162,7 @@ class ToolService:
                 tool_type=payload_dict.get("tool_type", "SANDBOX"),
                 is_public=payload_dict.get("is_public", False),
                 requires_approval=payload_dict.get("requires_approval", False),
+                network_access=payload_dict.get("network_access", False),
                 status=payload_dict.get("status", "DRAFT"),
                 dependencies=deps,
                 entry_point=entry_point,
@@ -201,7 +204,8 @@ class ToolService:
             description=payload_dict["desc"],
             schema_dict=schema_dict,
             tool_type=payload_dict.get("tool_type", "SANDBOX"),
-            code=payload_dict["script"]
+            code=payload_dict["script"],
+            network_access=payload_dict.get("network_access", False)
         )
         
         return str(tool_id)

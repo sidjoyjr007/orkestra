@@ -21,6 +21,7 @@ class Tool(Base):
     dependencies = Column(JSONB, default=list)
     entry_point = Column(String, default="execute")
     requires_approval = Column(Boolean, default=False)
+    network_access = Column(Boolean, default=False)
     allowed_roles = Column(JSONB, default=list)
     
     creator_id = Column(String, ForeignKey("users.id"), nullable=False)

@@ -10,6 +10,13 @@ from orkestra.core.tools import Tool
 from mcp.client.sse import sse_client
 from mcp.client.session import ClientSession
 
+def _resolve_docker_host(url: str) -> str:
+    import os, re
+    if os.path.exists("/.dockerenv"):
+        url = re.sub(r'://localhost\b', '://host.docker.internal', url)
+        url = re.sub(r'://127\.0\.0\.1\b', '://host.docker.internal', url)
+    return url
+
 logger = logging.getLogger(__name__)
 
 class MCPTool(Tool):
@@ -19,7 +26,7 @@ class MCPTool(Tool):
         self._session = session
         self._mcp_tool_name = name
         # Backwards compatibility for state.py serialization
-        self._url = url
+        self._url = _resolve_docker_host(url)
         self._headers = headers or {}
         if not self._headers.get("Accept"):
             self._headers["Accept"] = "text/event-stream, application/json"
@@ -47,6 +54,7 @@ class MCPTool(Tool):
                     self._session = None
 
             if not self._session:
+                logger.error(f"Connecting fresh to MCP Tool Server: {self._url}")
                 async with AsyncExitStack() as stack:
                     sse = await stack.enter_async_context(sse_client(url=self._url, headers=self._headers, timeout=300))
                     session = await stack.enter_async_context(ClientSession(sse[0], sse[1]))
@@ -80,7 +88,7 @@ class MCPHttpToolkit:
     Connects to a remote MCP server using the official MCP standard (SSE transport).
     """
     def __init__(self, url: str, headers: Optional[Dict[str, str]] = None):
-        self.url = url
+        self.url = _resolve_docker_host(url)
         self.headers = headers or {}
         # Required for standard SSE responses
         self.headers["Accept"] = "text/event-stream, application/json"

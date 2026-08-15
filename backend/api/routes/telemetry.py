@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from pydantic import BaseModel
 from datetime import datetime
+from sqlalchemy import func
 
 from backend.api.core.database import get_db
 from backend.api.core.dependencies import get_current_user_token
@@ -104,6 +105,30 @@ async def list_runs(
             } for r in runs
         ],
         "total": len(runs)
+    }
+
+@router.get("/stats")
+async def get_agent_stats(
+    agent_id: str,
+    user: dict = Depends(get_current_user_token),
+    db: AsyncSession = Depends(get_db)
+):
+    runs_query = select(func.count(AgentRun.id)).where(AgentRun.agent_id == agent_id)
+    runs_result = await db.execute(runs_query)
+    total_runs = runs_result.scalar() or 0
+    
+    active_query = select(func.count(AgentRun.id)).where(AgentRun.agent_id == agent_id, AgentRun.status == "IN_PROGRESS")
+    active_result = await db.execute(active_query)
+    active_executions = active_result.scalar() or 0
+    
+    tokens_query = select(func.sum(AgentRun.total_tokens)).where(AgentRun.agent_id == agent_id)
+    tokens_result = await db.execute(tokens_query)
+    total_tokens = tokens_result.scalar() or 0
+    
+    return {
+        "total_runs": total_runs,
+        "active_executions": active_executions,
+        "total_tokens": total_tokens
     }
 
 @router.get("/runs/{run_id}/events")

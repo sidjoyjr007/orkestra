@@ -30,6 +30,7 @@ class ToolCreateUpdate(BaseModel):
     tool_type: str = "SANDBOX"
     is_public: bool = False
     requires_approval: bool = False
+    network_access: bool = False
     status: str = "DRAFT"
     allowed_roles: Optional[List[str]] = []
 
