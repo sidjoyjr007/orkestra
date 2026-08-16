@@ -4,6 +4,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import or_, cast, String, func
 from backend.api.models.agent import AgentConfig
+from backend.api.models.deployment import AgentDeployment
+from backend.api.core.deployment.provider import LocalDockerProvider
 
 class AgentService:
     def __init__(self, db: AsyncSession):
@@ -119,5 +121,17 @@ class AgentService:
         if agent.creator_id != user_id and user_role != "ADMIN":
             raise PermissionError("Only the creator or ADMIN can delete this agent")
             
+        # Get deployment to remove container and isolated volume
+        dep_result = await self.db.execute(select(AgentDeployment).where(AgentDeployment.agent_id == agent_id))
+        deployment = dep_result.scalars().first()
+        if deployment and deployment.container_id:
+            try:
+                provider = LocalDockerProvider()
+                await provider.remove(deployment.container_id)
+                await provider.cleanup_volumes(f"orkestra-agent-{agent_id}")
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Failed to remove agent container/volume: {e}")
+                
         await self.db.delete(agent)
         await self.db.commit()

@@ -23,7 +23,7 @@ def get_chroma_collection(collection_name: str = "orkestra_tools"):
         logger.warning(f"Failed to connect to ChromaDB at {TOOL_REGISTRY_URL}: {e}")
         return None
 
-def embed_tool_in_vector_db(tool_id: str, name: str, description: str, schema_dict: dict, tool_type: str, mcp_url: str = None, mcp_id: str = None, code: str = None, network_access: bool = False):
+def embed_tool_in_vector_db(tool_id: str, name: str, description: str, schema_dict: dict, tool_type: str, mcp_url: str = None, mcp_id: str = None, mcp_name: str = None, code: str = None, network_access: bool = False):
     """
     Embeds a tool's semantic description into the vector DB for Tool RAG.
     Tools are embedded globally and filtered by authorized tool IDs during search.
@@ -46,6 +46,8 @@ def embed_tool_in_vector_db(tool_id: str, name: str, description: str, schema_di
         metadata["mcp_url"] = mcp_url
     if mcp_id:
         metadata["mcp_id"] = str(mcp_id)
+    if mcp_name:
+        metadata["mcp_name"] = str(mcp_name)
     if code:
         metadata["code"] = code
         

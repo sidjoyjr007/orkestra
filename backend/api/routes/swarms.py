@@ -8,7 +8,9 @@ import uuid
 
 from backend.api.core.database import get_db
 from backend.api.models.swarm import Swarm, SwarmAgent
+from backend.api.models.deployment import SwarmDeployment
 from backend.api.models.agent import AgentConfig
+from backend.api.core.deployment.provider import LocalDockerProvider
 
 router = APIRouter()
 
@@ -100,6 +102,18 @@ async def delete_swarm(swarm_id: str, db: AsyncSession = Depends(get_db)):
     if not swarm:
         raise HTTPException(status_code=404, detail="Swarm not found")
         
+    # Get deployment to remove container and isolated volume
+    dep_result = await db.execute(select(SwarmDeployment).where(SwarmDeployment.swarm_id == swarm_id))
+    deployment = dep_result.scalars().first()
+    if deployment and deployment.container_id:
+        try:
+            provider = LocalDockerProvider()
+            await provider.remove(deployment.container_id)
+            await provider.cleanup_volumes(f"orkestra-swarm-{swarm_id}")
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to remove swarm container/volume: {e}")
+            
     await db.delete(swarm)
     await db.commit()
     return {"message": "Swarm deleted successfully"}

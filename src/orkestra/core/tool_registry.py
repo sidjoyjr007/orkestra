@@ -130,9 +130,11 @@ class ToolRegistry:
                     
                 # We pass headers and url, MCPTool will dynamically create a session when executed.
                 headers = {"Accept": "text/event-stream, application/json"}
+                mcp_name = metadata.get("mcp_name", name)
                 
                 tool = MCPTool(
                     name=name,
+                    mcp_name=mcp_name,
                     description=description,
                     schema=schema,
                     url=mcp_url,

@@ -33,10 +33,10 @@ import { createSession } from "@/store/slices/sessionsSlice"
 
 export const AuthContext = createContext(null)
 
-const CreateAgentWrapper = ({ agents, availableTools, onSave, onBack }) => {
+const CreateAgentWrapper = ({ agents, availableTools, onSave, onBack, onRemoveAgent }) => {
   const { uuid } = useParams()
   const agent = uuid ? agents.find(a => a.id === uuid) : null
-  return <CreateAgent initialData={agent} availableTools={availableTools} onSave={onSave} onBack={onBack} />
+  return <CreateAgent initialData={agent} availableTools={availableTools} onSave={onSave} onBack={onBack} onRemoveAgent={onRemoveAgent} />
 }
 
 const CreateSwarmWrapper = ({ onBack }) => {
@@ -192,6 +192,7 @@ export default function App() {
                 availableTools={customTools}
                 onSave={handleSaveAgent}
                 onBack={() => navigateTo("profile")}
+                onRemoveAgent={handleRemoveAgent}
               />
             } />
             <Route path="/agents/edit/:uuid" element={
@@ -200,6 +201,7 @@ export default function App() {
                 availableTools={customTools}
                 onSave={handleSaveAgent}
                 onBack={() => navigateTo("profile")}
+                onRemoveAgent={handleRemoveAgent}
               />
             } />
             <Route path="/manage/:id" element={

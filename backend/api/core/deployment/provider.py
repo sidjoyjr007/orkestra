@@ -4,6 +4,7 @@ import uuid
 import socket
 import logging
 import os
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,10 @@ class BaseDeploymentProvider(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def cleanup_volumes(self, prefix: str):
+        pass
+
+    @abc.abstractmethod
     async def get_status(self, container_id: str) -> str:
         pass
 
@@ -45,11 +50,19 @@ class LocalDockerProvider(BaseDeploymentProvider):
             return s.getsockname()[1]
 
     async def _run_container(self, cmd_prefix, container_name, port, control_plane_url, extra_env=None, override_cmd=None):
+        # Retrieve the workspace directory from env, defaulting to current working directory
+        workspace_dir = os.environ.get("WORKSPACE_DIR", os.getcwd())
+        
+        # Ensure the host artifact directory exists
+        os.makedirs("/tmp/orkestra_artifacts", exist_ok=True)
+        
         cmd = cmd_prefix + [
             "--name", container_name,
             "-p", f"{port}:8000",
             "-v", "/var/run/docker.sock:/var/run/docker.sock",
             "-v", f"{os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../../src'))}:/app/src",
+            "-v", f"{container_name}_workspace:/workspace",
+            "-w", "/workspace",
             "-e", f"CONTROL_PLANE_URL={control_plane_url}"
         ]
         
@@ -104,7 +117,7 @@ class LocalDockerProvider(BaseDeploymentProvider):
             "AGENT_ID": agent_id,
             "DEPLOYMENT_TOKEN": deployment_token
         }
-        return await self._run_container(["docker", "run", "-d"], container_name, port, control_plane_url, extra_env)
+        return await self._run_container(["docker", "run", "-d"], container_name, port, control_plane_url, extra_env, override_cmd=["python", "/app/runner.py"])
 
     async def deploy_swarm(self, swarm_id: str, control_plane_url: str, deployment_token: str) -> dict:
         port = self._find_free_port()
@@ -130,7 +143,7 @@ class LocalDockerProvider(BaseDeploymentProvider):
             port, 
             control_plane_url, 
             extra_env, 
-            override_cmd=["python", "swarm_runner.py"]
+            override_cmd=["python", "/app/swarm_runner.py"]
         )
 
     async def stop(self, container_id: str):
@@ -148,9 +161,37 @@ class LocalDockerProvider(BaseDeploymentProvider):
 
     async def remove(self, container_id: str):
         try:
-            subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, check=True)
-        except subprocess.CalledProcessError as e:
+            # Extract the container name to dynamically delete its isolated volume
+            result = subprocess.run(["docker", "inspect", "-f", "{{.Name}}", container_id], capture_output=True, text=True)
+            container_name = result.stdout.strip().lstrip("/")
+            
+            subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, check=False) # Ignore if already removed
+            
+            if container_name:
+                for _ in range(3):
+                    await asyncio.sleep(1) # Give Docker daemon time to fully release the volume mount
+                    res = subprocess.run(["docker", "volume", "rm", "-f", f"{container_name}_workspace"], capture_output=True, text=True)
+                    if res.returncode == 0 or "No such volume" in res.stderr:
+                        break
+        except Exception as e:
             logger.error(f"Failed to remove container {container_id}: {e}")
+
+    async def cleanup_volumes(self, prefix: str):
+        """Forcefully cleans up any Docker volumes starting with the given prefix."""
+        try:
+            res = subprocess.run(["docker", "volume", "ls", "-q"], capture_output=True, text=True)
+            if not res.stdout:
+                return
+                
+            for vol in res.stdout.strip().split("\n"):
+                if vol.startswith(prefix):
+                    for _ in range(3):
+                        rm_res = subprocess.run(["docker", "volume", "rm", "-f", vol], capture_output=True, text=True)
+                        if rm_res.returncode == 0 or "No such volume" in rm_res.stderr:
+                            break
+                        await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"Failed to cleanup volumes for prefix {prefix}: {e}")
 
     async def get_status(self, container_id: str) -> str:
         try:

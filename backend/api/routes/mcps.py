@@ -5,6 +5,7 @@ from sqlalchemy import or_, cast, String
 from pydantic import BaseModel, ConfigDict
 from typing import List, Optional, Any, Dict
 import json
+import re
 
 from backend.api.core.database import get_db
 from backend.api.core.dependencies import get_current_user_token, require_permission
@@ -45,13 +46,18 @@ async def _sync_mcp_tools(mcp: McpConfig):
                 delete_tool_from_vector_db(mcp_id=mcp.id)
                 
                 for t in tools_response.tools:
+                    sanitized_name = re.sub(r'[^a-zA-Z0-9_\.\-:]', '_', t.name)
+                    if not re.match(r'^[a-zA-Z_]', sanitized_name):
+                        sanitized_name = '_' + sanitized_name
+                    sanitized_name = sanitized_name[:128]
+                    
                     # Construct a unique tool_id for the MCP tool
                     tool_id = f"{mcp.id}_{t.name}"
                     
                     schema_dict = {
                         "type": "function",
                         "function": {
-                            "name": t.name,
+                            "name": sanitized_name,
                             "description": t.description or "No description provided.",
                             "parameters": t.inputSchema
                         }
@@ -59,12 +65,13 @@ async def _sync_mcp_tools(mcp: McpConfig):
                     
                     embed_tool_in_vector_db(
                         tool_id=tool_id,
-                        name=t.name,
+                        name=sanitized_name,
                         description=t.description or "",
                         schema_dict=schema_dict,
                         tool_type="mcp",
                         mcp_url=mcp.endpoint,
-                        mcp_id=mcp.id
+                        mcp_id=mcp.id,
+                        mcp_name=t.name
                     )
     except Exception as e:
         print(f"Error syncing MCP tools for {mcp.name}: {e}")

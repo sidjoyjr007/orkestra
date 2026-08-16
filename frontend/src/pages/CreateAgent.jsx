@@ -25,6 +25,7 @@ import { CheckboxMultiSelect } from "@/components/CheckboxMultiSelect"
 export function CreateAgent({
   onSave,
   onBack,
+  onRemoveAgent,
   initialData = null,
 }) {
   const isEdit = !!initialData
@@ -45,6 +46,7 @@ export function CreateAgent({
   const [guardrailOptions, setGuardrailOptions] = useState([])
   const [roleOptions, setRoleOptions] = useState([])
   const [isPublic, setIsPublic] = useState(initialData?.is_public || false)
+  const [error, setError] = useState(null)
 
   useEffect(() => {
     const fetchLlms = async () => {
@@ -167,8 +169,19 @@ export function CreateAgent({
       onSave({ ...payload, id: resData.id || payload.id })
       onBack()
     } catch (err) {
-      console.error(err)
-      // Usually would show toast here, but for now we'll just log
+      setError(err.message)
+    }
+  }
+
+  const handleDelete = async () => {
+    if (!initialData?.id || !onRemoveAgent) return
+    if (window.confirm(`Are you sure you want to delete ${agentName}? This will completely destroy the agent and its volume.`)) {
+      try {
+        await onRemoveAgent(initialData.id)
+        onBack()
+      } catch (err) {
+        setError(err.message || "Failed to delete agent")
+      }
     }
   }
 
@@ -384,13 +397,22 @@ export function CreateAgent({
         </Card>
 
         {/* Form Actions */}
-        <div className="flex justify-end gap-2 pb-6">
-          <Button type="button" variant="outline" onClick={onBack} className="text-xs h-9 cursor-pointer">
-            Cancel
-          </Button>
-          <Button type="submit" className="text-xs h-9 cursor-pointer px-5">
-            {isEdit ? "Save Agent" : "Create Agent"}
-          </Button>
+        <div className="flex justify-between pb-6">
+          <div>
+            {isEdit && onRemoveAgent && (
+              <Button type="button" variant="destructive" onClick={handleDelete} className="text-xs h-9 cursor-pointer">
+                Delete Agent
+              </Button>
+            )}
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={onBack} className="text-xs h-9 cursor-pointer">
+              Cancel
+            </Button>
+            <Button type="submit" className="text-xs h-9 cursor-pointer px-5" >
+              {isEdit ? "Save Agent" : "Create Agent"}
+            </Button>
+          </div>
         </div>
       </form>
     </div>

@@ -5,6 +5,7 @@ import os
 import subprocess
 import json
 import platform
+import sys
 from typing import List, Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -96,6 +97,12 @@ class ToolService:
         user_permissions: List[str]
     ) -> str:
         tool_id = payload_dict.get("id") if payload_dict.get("id") else str(uuid.uuid4())
+        
+        import re
+        sanitized_name = re.sub(r'[^a-zA-Z0-9_\.\-:]', '_', payload_dict["name"])
+        if not re.match(r'^[a-zA-Z_]', sanitized_name):
+            sanitized_name = '_' + sanitized_name
+        payload_dict["name"] = sanitized_name[:128]
         
         result = await self.db.execute(select(Tool).where(Tool.id == tool_id))
         existing_tool = result.scalars().first()
@@ -285,6 +292,9 @@ if __name__ == "__main__":
                 f.write(script_content)
                 
             deps = tool.dependencies or []
+            if deps:
+                deps = [d for d in deps if d not in sys.stdlib_module_names]
+                
             req_path = os.path.join(tmpdir, "requirements.txt")
             with open(req_path, "w") as f:
                 f.write("\n".join(deps))

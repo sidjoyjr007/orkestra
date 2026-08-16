@@ -55,9 +55,21 @@ services:
       timeout: 5s
       retries: 5
 
+  orkestra-chroma:
+    image: chromadb/chroma:latest
+    container_name: orkestra-chroma
+    ports:
+      - "8100:8000"
+    volumes:
+      - orkestra_chroma_data:/chroma/chroma
+    networks:
+      - orkestra-net
+    restart: unless-stopped
+
 networks:
   orkestra-net:
     driver: bridge
 
 volumes:
   orkestra_db_data:
+  orkestra_chroma_data:

@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import uuid
 from typing import List, Dict, Optional, Any
 from contextlib import AsyncExitStack
@@ -21,10 +22,10 @@ logger = logging.getLogger(__name__)
 
 class MCPTool(Tool):
     """A proxy tool that executes remotely on an MCP server using the official standard."""
-    def __init__(self, name: str, description: str, schema: Dict[str, Any], session: Optional[ClientSession] = None, url: str = "", headers: Optional[Dict[str, str]] = None, **kwargs):
+    def __init__(self, name: str, description: str, schema: Dict[str, Any], session: Optional[ClientSession] = None, url: str = "", headers: Optional[Dict[str, str]] = None, mcp_name: Optional[str] = None, **kwargs):
         super().__init__(name, description, lambda **kwargs: None, schema)
         self._session = session
-        self._mcp_tool_name = name
+        self._mcp_tool_name = mcp_name if mcp_name is not None else name
         # Backwards compatibility for state.py serialization
         self._url = _resolve_docker_host(url)
         self._headers = headers or {}
@@ -147,19 +148,25 @@ class MCPHttpToolkit:
                 return s
 
             for t in tools_response.tools:
+                sanitized_name = re.sub(r'[^a-zA-Z0-9_\.\-:]', '_', t.name)
+                if not re.match(r'^[a-zA-Z_]', sanitized_name):
+                    sanitized_name = '_' + sanitized_name
+                sanitized_name = sanitized_name[:128]
+                
                 fixed_input_schema = _fix_schema(t.inputSchema)
                 # Wrap the MCP input schema in an OpenAI-compatible function schema
                 schema = {
                     "type": "function",
                     "function": {
-                        "name": t.name,
+                        "name": sanitized_name,
                         "description": t.description or "",
                         "parameters": fixed_input_schema
                     }
                 }
                 
                 orkestra_tools.append(MCPTool(
-                    name=t.name,
+                    name=sanitized_name,
+                    mcp_name=t.name,
                     description=t.description or "",
                     schema=schema,
                     session=self._session,

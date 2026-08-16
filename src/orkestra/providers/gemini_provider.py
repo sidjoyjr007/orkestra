@@ -1,3 +1,4 @@
+import uuid
 import os
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
 from google import genai
@@ -267,7 +268,7 @@ class GeminiProvider(BaseProvider):
             import json
             tool_calls = [
                 ToolCall(
-                    id=f"call_{i}",
+                    id=f"call_{uuid.uuid4().hex[:16]}",
                     function_name=fc.name,
                     function_arguments=json.dumps(fc.args)
                 )
@@ -341,7 +342,7 @@ class GeminiProvider(BaseProvider):
                 import json
                 tool_calls = [
                     ToolCall(
-                        id=f"call_stream_{fc.name}",
+                        id=f"call_{uuid.uuid4().hex[:16]}",
                         function_name=fc.name,
                         function_arguments=json.dumps(fc.args)
                     )
@@ -424,7 +425,7 @@ class GeminiProvider(BaseProvider):
             import json
             tool_calls = [
                 ToolCall(
-                    id=f"call_{i}",
+                    id=f"call_{uuid.uuid4().hex[:16]}",
                     function_name=fc.name,
                     function_arguments=json.dumps(fc.args)
                 )
@@ -495,7 +496,7 @@ class GeminiProvider(BaseProvider):
                 import json
                 tool_calls = [
                     ToolCall(
-                        id=f"call_stream_{fc.name}",
+                        id=f"call_{uuid.uuid4().hex[:16]}",
                         function_name=fc.name,
                         function_arguments=json.dumps(fc.args)
                     )

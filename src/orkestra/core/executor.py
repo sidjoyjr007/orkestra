@@ -13,6 +13,28 @@ from orkestra.core.telemetry import get_logger
 
 logger = get_logger("orkestra.core.executor")
 
+import time
+
+def _cleanup_old_artifacts(artifact_dir: str, ttl_minutes: int = 120):
+    try:
+        if not os.path.exists(artifact_dir):
+            return
+            
+        current_time = time.time()
+        ttl_seconds = ttl_minutes * 60
+        
+        for f in os.listdir(artifact_dir):
+            if f.endswith(".txt"):
+                file_path = os.path.join(artifact_dir, f)
+                try:
+                    if current_time - os.path.getmtime(file_path) > ttl_seconds:
+                        os.remove(file_path)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 class ToolExecutor:
     """
     Handles the execution of tools on behalf of an Agent.
@@ -175,11 +197,12 @@ class ToolExecutor:
                     result = str(result)
                     
             if tool and getattr(tool, 'max_result_length', None) is not None and len(result) > tool.max_result_length:
-                artifact_dir = f"/tmp/orkestra_artifacts/{self.agent.session_id}"
+                artifact_dir = f"/workspace/.artifacts/{self.agent.session_id}"
                 os.makedirs(artifact_dir, exist_ok=True)
                 artifact_path = os.path.join(artifact_dir, f"{tool_call.id}.txt")
                 with open(artifact_path, "w") as f:
                     f.write(result)
+                _cleanup_old_artifacts(artifact_dir)
                 result = result[:tool.max_result_length] + f"\n... [TRUNCATED] The output exceeded the maximum length. The full raw output was automatically saved to: {artifact_path}."
                     
             if self.event_bus:
@@ -274,13 +297,14 @@ class ToolExecutor:
                 error = result
                 
         if tool and getattr(tool, 'max_result_length', None) is not None and len(result) > tool.max_result_length:
-            artifact_dir = f"/tmp/orkestra_artifacts/{self.agent.session_id}"
+            artifact_dir = f"/workspace/.artifacts/{self.agent.session_id}"
             os.makedirs(artifact_dir, exist_ok=True)
             artifact_path = os.path.join(artifact_dir, f"{tool_call.id}.txt")
             
             def write_artifact():
                 with open(artifact_path, "w") as f:
                     f.write(result)
+                _cleanup_old_artifacts(artifact_dir)
             await asyncio.to_thread(write_artifact)
             
             result = result[:tool.max_result_length] + f"\n... [TRUNCATED] The output exceeded the maximum length. The full raw output was automatically saved to: {artifact_path}."

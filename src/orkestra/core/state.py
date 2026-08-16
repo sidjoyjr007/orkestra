@@ -18,6 +18,7 @@ class AgentStateSerializer:
                     "name": tool.name,
                     "type": "mcp",
                     "mcp_url": tool._url,
+                    "mcp_name": tool._mcp_tool_name,
                     "schema": tool.schema,
                     "headers": getattr(tool, '_headers', {})
                 })
@@ -90,8 +91,10 @@ class AgentStateSerializer:
             elif tool_state.get("type") == "mcp":
                 # Reconstruct live MCP Tool
                 fixed_schema = _fix_schema(tool_state["schema"])
+                mcp_name = tool_state.get("mcp_name", tool_state["name"])
                 new_tools.append(MCPTool(
                     name=tool_state["name"],
+                    mcp_name=mcp_name,
                     description=fixed_schema.get("function", {}).get("description", ""),
                     schema=fixed_schema,
                     url=tool_state["mcp_url"],
